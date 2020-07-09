@@ -1,19 +1,20 @@
 use std::thread;
 use std::process::Command;
-use std::fs::File;
+use std::fs::{File, create_dir_all};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use std::cmp;
 
 use csv::Reader;
-use brotli;
 use serde_json;
 use serde_json::json;
 use chrono::{DateTime, FixedOffset};
-
+use brotli2::write;
 extern crate num_cpus;
 extern crate clap;
 use clap::{Arg, App};
+
+const BROTLI_COMPRESSION_LEVEL: u32 = 9;
 
 /// Uses https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(working_dir: String, storage_dir: String, date: String) {
@@ -41,13 +42,6 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
             // write record to file
             let rev_id = u64::from_str_radix(&record[0], 10).unwrap();
             {
-                let record_path = format!(
-                    "{}/{}/{}/{}",
-                    base_dir,
-                    rev_id % 10000,
-                    rev_id % 100000000,
-                    record[0].to_string()
-                );
                 let record_string = json!({
                     "id": record[0],
                     "parent_id": record[1],
@@ -61,9 +55,22 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
                     "page_id": record[9],
                     "page_ns": record[10]
                 }).to_string();
-                let mut out_file = File::create(&record_path).unwrap();
-                let mut writer = brotli::DecompressorWriter::new(&mut out_file, 4096);
-                writer.write(record_string.as_bytes());
+                let record_dir = format!(
+                    "/{}/{}/{}",
+                    base_dir,
+                    rev_id % 10000,
+                    rev_id % 100000000,
+                );
+                let record_path = format!(
+                    "{}/{}",
+                    record_dir,
+                    record[0].to_string()
+                );
+                create_dir_all(record_dir).unwrap();
+                let out_file = File::create(&record_path).unwrap();
+                let buf = BufWriter::new(out_file);
+                let mut writer = write::BrotliEncoder::new(buf, BROTLI_COMPRESSION_LEVEL);
+                writer.write(record_string.as_bytes()).unwrap();
             }
 
             // populate date to id map
@@ -72,6 +79,11 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
                 date_map.get_mut(&date).unwrap().push(rev_id);
             } else {
                 date_map.insert(date, vec![rev_id]);
+            }
+
+            if date_map.len() % 100000 == 0 {
+                println!("current # of revisions handled: {}", date_map.len());
+                println!("most recent case handled: {:#?}", record);
             }
         }
 
@@ -96,8 +108,6 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
         let pipe_name = pipe_name.clone();
         let num_cores = format!("{}", cmp::max(num_cpus::get() - 1, 2));
 
-        let out = File::create("out.log").unwrap();
-        let err = File::create("err.log").unwrap();
         thread::spawn(
             move || {
                 let status = Command::new("/src/download")
@@ -108,7 +118,10 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
                     .status()
                     .unwrap();
                 if !status.success() {
-                    panic!("loader failed. Exit code: {:#?}", status.code());
+                    match status.code() {
+                        Some(n) => panic!("loader failed. Exit code: {}", n),
+                        None => panic!("loader failed. No exit code collected.")
+                    }
                 }
             }
         )
