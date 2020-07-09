@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+# args: working directory, dump date (YYYYMMDD), num subprocesses, pipe file
+
+cd $1 &&
+pypy3 -u -m wikipedia_revisions.download --date $2 --num-subprocesses $3 --large-memory --pipe $4
