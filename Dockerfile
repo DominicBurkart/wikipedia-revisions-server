@@ -17,7 +17,6 @@ RUN chmod +x /src/download
 RUN /root/.cargo/bin/cargo build
 RUN mkfifo revisions.pipe
 ENV RUST_BACKTRACE=1
-RUN /root/.cargo/bin/cargo test
 ENTRYPOINT ["./target/debug/wikipedia-revisions-server"]
 
 # example use:
