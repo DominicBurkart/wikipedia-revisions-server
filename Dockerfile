@@ -14,10 +14,10 @@ RUN /root/.cargo/bin/cargo fetch
 # add code & compile
 ADD src/* src/
 RUN chmod +x /src/download
-RUN /root/.cargo/bin/cargo build
+RUN /root/.cargo/bin/cargo clippy & /root/.cargo/bin/cargo build --release
 RUN mkfifo revisions.pipe
 ENV RUST_BACKTRACE=1
-ENTRYPOINT ["./target/debug/wikipedia-revisions-server"]
+ENTRYPOINT ["./target/release/wikipedia-revisions-server"]
 
 # example use:
 # docker build -t wikipedia-revisions-server .
