@@ -1,11 +1,11 @@
 use std::thread;
 use std::process::Command;
 use std::fs::{File, create_dir_all, remove_file, read_dir};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Write, BufWriter, BufReader};
 use std::cmp;
-use std::collections::HashMap;
 use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use csv::Reader;
 use serde_json::json;
@@ -17,12 +17,12 @@ use clap::{Arg, App};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
 use regex::Regex;
-use crossbeam::crossbeam_channel::{Receiver, Select, unbounded};
+use crossbeam::crossbeam_channel::{Receiver, Select, bounded};
 
 
 const BROTLI_COMPRESSION_LEVEL: u32 = 9;
 
-fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str) {
+fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str, dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<u64>>>>) {
     let f = File::open(&input_path).unwrap();
     let buf = BufReader::new(f);
     let reader = Reader::from_reader(buf);
@@ -63,7 +63,7 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str) {
                         "page_ns": record[10]
                     }).to_string();
                     let record_dir = format!(
-                        "/{}/{}/{}",
+                        "{}/{}/{}",
                         base_dir,
                         rev_id % 10000,
                         rev_id % 100000000,
@@ -87,9 +87,9 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str) {
     )
     .collect();
 
-    println!("pipe read completed. saving date index...");
+    println!("pipe read for {} completed. saving date index...", input_path);
 
-    let mut date_map: BTreeMap<DateTime<FixedOffset>, Vec<u64>> = Default::default();
+    let mut date_map = dates_to_ids.lock().unwrap();
     date_vec
         .drain(..)
         .for_each(
@@ -99,51 +99,47 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str) {
                     .or_insert_with(Vec::new)
                     .push(rev_id)
         );
-
-    // save date to id map
-    // todo should we mutex this into a single thread for combination? or send it via messages?
-    let date_map_file = File::create(
-        format!(
-            "{}/date_map.json",
-            base_dir
-        )
-    ).unwrap();
-    serde_json::to_writer(
-        date_map_file,
-        &date_map
-    ).unwrap();
-
-    println!("date index complete");
 }
 
 fn monitor_input_pipes(
     storage_dir: String,
     downloader_receiver: Receiver<bool>
 ) {
+    let pipe_dir = "/pipes";
     let mut pending_receivers = HashMap::new();
     pending_receivers.insert("_".to_string(), downloader_receiver);
     let re = Regex::new(r"revisions-\d+-\d+\.pipe").unwrap();
     let mut complete = false;
     let mut one_found = false;
+    let dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<u64>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let mut processor_threads = Vec::new();
+
+    // until the downloader is complete, scan for open pipes. Each time one is opened, start a
+    // thread devoted to reading its contents into the storage directory.
     while !complete {
-        for entry in read_dir("/").unwrap() {
-            let name = entry.unwrap().file_name().into_string().unwrap();
+        for entry in read_dir(pipe_dir).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
             let storage_dir = storage_dir.clone();
             if re.is_match(&name) && !pending_receivers.contains_key(&name) {
-                let (tx, rx) = unbounded();
-                {
-                    let name = name.clone();
+                let (tx, rx) = bounded(1);
+                let dates_to_ids = Arc::clone(&dates_to_ids);
+                let storage_dir = storage_dir.clone();
+                processor_threads.push(
                     thread::spawn(
                         move || {
+                            let entry_path = entry.path();
+                            let path = entry_path.to_str().unwrap();
                             revisions_csv_to_files(
-                                &name,
-                                &storage_dir
+                                path,
+                                &storage_dir,
+                                dates_to_ids
                             );
-                            remove_file(&name).unwrap();
+                            remove_file(path).unwrap();
                             tx.send(true).unwrap();
                         }
-                    );
-                }
+                    )
+                );
                 pending_receivers.insert(name, rx);
                 one_found = true;
             }
@@ -155,6 +151,9 @@ fn monitor_input_pipes(
         } else if pending_receivers.is_empty() {
             complete = true;
         } else {
+            // pause this thread until the downloader or one of the
+            // open processors sends a completion message.
+
             let mut select = Select::new();
             for receiver in pending_receivers.values() {
                 select.recv(receiver);
@@ -171,13 +170,30 @@ fn monitor_input_pipes(
                 );
         }
     }
+
+    // we need all of the
+    for handle in processor_threads {
+        handle.join().unwrap()
+    }
+
+    // save date to id map
+    let date_map_file = File::create(
+        format!(
+            "{}/date_map.json",
+            &storage_dir
+        )
+    ).unwrap();
+    serde_json::to_writer(
+        date_map_file,
+        &*dates_to_ids.lock().unwrap()
+    ).unwrap();
 }
 
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(working_dir: String, storage_dir: String, date: String) {
     let downloader_receiver = {
-        let num_cores = format!("{}", cmp::max(num_cpus::get() - 1, 3));
-        let (tx, rx) = unbounded();
+        let num_cores = format!("{}", cmp::max(num_cpus::get() - 1, 4));
+        let (tx, rx) = bounded(1);
 
         thread::spawn(
             move || {
@@ -219,8 +235,8 @@ fn main() {
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
         download_revisions(
-            "working_dir".to_string(),
-            "storage_dir".to_string(),
+            "/working_dir".to_string(),
+            "/storage_dir".to_string(),
             date.to_string()
         );
     }

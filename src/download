@@ -3,4 +3,4 @@
 # args: working directory, dump date (YYYYMMDD), num subprocesses
 
 cd $1 &&
-nice -n 5 pypy3 -u -m wikipedia_revisions.download --date $2 --num-subprocesses $3 --large-memory --pipe-dir /
+nice -n 5 pypy3 -u -m wikipedia_revisions.download --date $2 --num-subprocesses $3 --large-memory --pipe-dir /pipes
