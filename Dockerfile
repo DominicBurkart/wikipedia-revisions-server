@@ -1,10 +1,10 @@
 FROM pypy:3
 
-# install revisions downloader
-RUN pypy3 -m pip install git+https://github.com/DominicBurkart/wikipedia-revisions.git
-
 # install rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# install revisions downloader
+RUN pypy3 -m pip install git+https://github.com/DominicBurkart/wikipedia-revisions.git
 
 # download & cache crates.io registry and project dependencies
 RUN mkdir src && cd src && echo 'fn main() {}' > main.rs
