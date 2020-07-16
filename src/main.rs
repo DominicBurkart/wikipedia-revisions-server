@@ -2,7 +2,7 @@ use std::thread;
 use std::process::Command;
 use std::fs::{File, create_dir_all, remove_file, read_dir};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Write, BufWriter, BufReader};
+use std::io::{Write, BufReader};
 use std::cmp;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
@@ -18,74 +18,123 @@ use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
 use regex::Regex;
 use crossbeam::crossbeam_channel::{Receiver, Select, bounded};
+use serde::{Serialize, Deserialize};
+use futures::executor::block_on;
 
+const BROTLI_COMPRESSION_LEVEL: u32 = 11;
+const WORKING_DIR: &str = "/working_dir";
+const STORAGE_DIR: &str = "/storage_dir";
 
-const BROTLI_COMPRESSION_LEVEL: u32 = 9;
+type RevisionID = u64;
+type ContributorID = u64;
+type PageID = u64;
 
-fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str, dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<u64>>>>) {
-    let f = File::open(&input_path).unwrap();
-    let buf = BufReader::new(f);
-    let reader = Reader::from_reader(buf);
-    let mut date_vec: Vec<(DateTime<FixedOffset>, u64)> = reader
-        .into_records()
-        .filter_map(Result::ok)
-        .par_bridge()
-        .map(
-            |record| {
-                // row content:
-                //    [
-                //        "id",
-                //        "parent_id",
-                //        "page_title",
-                //        "contributor_id",
-                //        "contributor_name",
-                //        "contributor_ip",
-                //        "timestamp",
-                //        "text",
-                //        "comment",
-                //        "page_id",
-                //        "page_ns",
-                //    ]
-                // write record to file
-                let rev_id = u64::from_str_radix(&record[0], 10).unwrap();
-                {
-                    let record_string = json!({
-                        "id": record[0],
-                        "parent_id": record[1],
-                        "page_title": record[2],
-                        "contributor_id": record[3],
-                        "contributor_name": record[4],
-                        "contributor_ip": record[5],
-                        "timestamp": record[6],
-                        "text": record[7],
-                        "comment": record[8],
-                        "page_id": record[9],
-                        "page_ns": record[10]
-                    }).to_string();
-                    let record_dir = format!(
-                        "{}/{}/{}",
-                        base_dir,
-                        rev_id % 10000,
-                        rev_id % 100000000,
-                    );
-                    let record_path = format!(
-                        "{}/{}",
-                        record_dir,
-                        record[0].to_string()
-                    );
-                    create_dir_all(record_dir).unwrap();
-                    let out_file = File::create(&record_path).unwrap();
-                    let buf = BufWriter::new(out_file);
-                    let mut writer = write::BrotliEncoder::new(buf, BROTLI_COMPRESSION_LEVEL);
-                    writer.write_all(record_string.as_bytes()).unwrap();
-                }
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+struct RawRevision {
+    id: RevisionID,
+    parent_id: Option<RevisionID>,
+    page_title: String,
+    contributor_id: Option<ContributorID>,
+    contributor_name: Option<String>,
+    contributor_ip: Option<String>,
+    timestamp: String,
+    text: Option<String>,
+    comment: Option<String>,
+    page_id: PageID,
+    page_ns: u32
+}
 
-                // populate date to id map
-                let date = DateTime::parse_from_rfc3339(&record[6]).unwrap();
-                (date, rev_id)
-        }
+fn revision_dir_from_id<'a>(id: RevisionID) -> String {
+    format!(
+        "{}/{}/{}/{}/{}",
+        STORAGE_DIR,
+        id % 10,
+        id % 1000,
+        id % 100000,
+        id % 10000000
     )
-    .collect();
+}
+
+fn revision_path_from_id<'a>(id: RevisionID) -> String {
+    format!(
+        "{}/{}",
+        revision_dir_from_id(id),
+        id.to_string()
+    )
+}
+
+fn get_raw_revision(id: RevisionID) -> RawRevision {
+    // todo should return a Result, but I wasn't sure what the error type should be
+    let json_array = {
+        let file = File::open(
+            &revision_path_from_id(id)
+        ).unwrap();
+        let decompressor = brotli2::read::BrotliDecoder::new(file);
+        let mut json_array = String::new();
+        decompressor.read_to_string(&mut json_array).unwrap();
+        json_array
+    };
+    serde_json::from_str(&json_array).unwrap()
+}
+
+fn revisions_csv_to_files<'a>(input_path: &'a str, dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<u64>>>>) {
+    let mut date_vec: Vec<(DateTime<FixedOffset>, u64)> = {
+        let f = File::open(&input_path).unwrap();
+        let buf = BufReader::new(f);
+        let reader = Reader::from_reader(buf);
+
+        reader
+            .into_records()
+            .filter_map(Result::ok)
+            .par_bridge()
+            .map(
+                |record| {
+                    // row content:
+                    //    [
+                    //        "id",
+                    //        "parent_id",
+                    //        "page_title",
+                    //        "contributor_id",
+                    //        "contributor_name",
+                    //        "contributor_ip",
+                    //        "timestamp",
+                    //        "text",
+                    //        "comment",
+                    //        "page_id",
+                    //        "page_ns",
+                    //    ]
+                    // write record to file
+                    let rev_id = RevisionID::from_str_radix(&record[0], 10).unwrap();
+                    {
+                        let record_dir = revision_dir_from_id(rev_id);
+                        create_dir_all(record_dir).unwrap();
+
+                        let record_string = json!({
+                            "id": record[0],
+                            "parent_id": record[1],
+                            "page_title": record[2],
+                            "contributor_id": record[3],
+                            "contributor_name": record[4],
+                            "contributor_ip": record[5],
+                            "timestamp": record[6],
+                            "text": record[7],
+                            "comment": record[8],
+                            "page_id": record[9],
+                            "page_ns": record[10]
+                        }).to_string();
+                        let record_path = revision_path_from_id(rev_id);
+                        let out_file = File::create(record_path).unwrap();
+                        let mut writer = write::BrotliEncoder::new(out_file, BROTLI_COMPRESSION_LEVEL);
+                        writer.write_all(record_string.as_bytes()).unwrap();
+                    }
+
+                    // populate date to id map
+                    let date = DateTime::parse_from_rfc3339(&record[6]).unwrap();
+                    (date, rev_id)
+                }
+            )
+            .collect()
+    };
 
     println!("pipe read for {} completed. saving date index...", input_path);
 
@@ -102,7 +151,6 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, base_dir: &'a str, dates_to_i
 }
 
 fn monitor_input_pipes(
-    storage_dir: String,
     downloader_receiver: Receiver<bool>
 ) {
     let pipe_dir = "/pipes";
@@ -111,7 +159,7 @@ fn monitor_input_pipes(
     let re = Regex::new(r"revisions-\d+-\d+\.pipe").unwrap();
     let mut complete = false;
     let mut one_found = false;
-    let dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<u64>>>> = Arc::new(Mutex::new(BTreeMap::new()));
+    let dates_to_ids: Arc<Mutex<BTreeMap<DateTime<FixedOffset>, Vec<RevisionID>>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let mut processor_threads = Vec::new();
 
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
@@ -120,11 +168,9 @@ fn monitor_input_pipes(
         for entry in read_dir(pipe_dir).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().into_string().unwrap();
-            let storage_dir = storage_dir.clone();
             if re.is_match(&name) && !pending_receivers.contains_key(&name) {
                 let (tx, rx) = bounded(1);
                 let dates_to_ids = Arc::clone(&dates_to_ids);
-                let storage_dir = storage_dir.clone();
                 processor_threads.push(
                     thread::spawn(
                         move || {
@@ -132,7 +178,6 @@ fn monitor_input_pipes(
                             let path = entry_path.to_str().unwrap();
                             revisions_csv_to_files(
                                 path,
-                                &storage_dir,
                                 dates_to_ids
                             );
                             remove_file(path).unwrap();
@@ -180,7 +225,7 @@ fn monitor_input_pipes(
     let date_map_file = File::create(
         format!(
             "{}/date_map.json",
-            &storage_dir
+            STORAGE_DIR
         )
     ).unwrap();
     serde_json::to_writer(
@@ -190,7 +235,7 @@ fn monitor_input_pipes(
 }
 
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
-fn download_revisions(working_dir: String, storage_dir: String, date: String) {
+fn download_revisions(date: String) {
     let downloader_receiver = {
         let num_cores = format!("{}", cmp::max(num_cpus::get() - 1, 4));
         let (tx, rx) = bounded(1);
@@ -199,7 +244,7 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
             move || {
                 println!("starting downloader program...");
                 let status = Command::new("/src/download")
-                    .arg(&working_dir)
+                    .arg(WORKING_DIR)
                     .arg(&date)
                     .arg(&num_cores)
                     .status()
@@ -216,7 +261,12 @@ fn download_revisions(working_dir: String, storage_dir: String, date: String) {
         rx
     };
 
-    monitor_input_pipes(storage_dir, downloader_receiver);
+    monitor_input_pipes(downloader_receiver);
+}
+
+#[actix_rt::main]
+async fn server() -> std::io::Result<()> {
+    unimplemented!()
 }
 
 fn main() {
@@ -235,12 +285,10 @@ fn main() {
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
         download_revisions(
-            "/working_dir".to_string(),
-            "/storage_dir".to_string(),
             date.to_string()
         );
     }
 
     // start server
-    unimplemented!();
+    block_on(server());
 }
