@@ -308,12 +308,15 @@ fn monitor_input_pipes(
         } else {
             // pause this thread until the downloader or one of the
             // open processors sends a completion message.
+            // Restart this thread once per minute to scan for any
+            // new pipes that might have been created.
 
             let mut select = Select::new();
             for receiver in pending_receivers.values() {
                 select.recv(receiver);
             }
-            select.ready();
+
+            select.ready_timeout(Duration::from_secs(60)).ok();
 
             pending_receivers
                 .retain(
