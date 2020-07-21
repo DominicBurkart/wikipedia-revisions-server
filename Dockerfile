@@ -16,7 +16,7 @@ RUN mkdir /pipes
 # add code & compile
 ADD src/* src/
 RUN chmod +x /src/download
-RUN /root/.cargo/bin/cargo clippy & /root/.cargo/bin/cargo build --release
+RUN /root/.cargo/bin/cargo build --release
 ENV RUST_BACKTRACE=1
 ENTRYPOINT ["./target/release/wikipedia-revisions-server"]
 

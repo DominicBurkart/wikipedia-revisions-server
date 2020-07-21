@@ -1,6 +1,6 @@
 use std::thread;
 use std::process::Command;
-use std::fs::{File, create_dir_all, remove_file, read_dir, OpenOptions};
+use std::fs::{File, remove_file, read_dir};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write, BufReader, SeekFrom, Seek};
 use std::cmp;
@@ -26,15 +26,14 @@ use futures::stream::{self, Stream};
 use bytes::Bytes;
 #[macro_use]
 extern crate lazy_static;
-extern crate fs2;
-use fs2::FileExt;
 
-const BROTLI_COMPRESSION_LEVEL: u32 = 11;
+const BROTLI_COMPRESSION_LEVEL: u32 = 9;
 const WORKING_DIR: &str = "/working_dir";
 const STORAGE_DIR: &str = "/storage_dir";
 const DATES_TO_IDS_FILE: &str = "/storage_dir/date_map.json";
 const IDS_TO_POSITIONS_FILE: &str = "/storage_dir/id_map.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
+// ^ must be less than max usize.
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -160,7 +159,12 @@ fn path_from_revision_id(id: RevisionID) -> String {
     )
 }
 
-fn revisions_csv_to_files<'a>(input_path: &'a str, dates_to_ids: Arc<Mutex<DatesToIds>>, ids_to_positions: Arc<Mutex<IdsToPositions>>) {
+fn revisions_csv_to_files<'a>(
+    input_path: &'a str,
+    dates_to_ids: Arc<Mutex<DatesToIds>>,
+    ids_to_positions: Arc<Mutex<IdsToPositions>>,
+    file_locks: Arc<Vec<Mutex<File>>>
+) {
     let mut records_vec: Vec<(Instant, u64, Position)> = {
         let f = File::open(&input_path).unwrap();
         let buf = BufReader::new(f);
@@ -189,46 +193,43 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, dates_to_ids: Arc<Mutex<Dates
                     // write record to file
                     let revision_id = RevisionID::from_str_radix(&record[0], 10).unwrap();
                     let (record_start, record_length) = {
-                        let record_string = json!({
-                            "id": record[0],
-                            "parent_id": record[1],
-                            "page_title": record[2],
-                            "contributor_id": record[3],
-                            "contributor_name": record[4],
-                            "contributor_ip": record[5],
-                            "timestamp": record[6],
-                            "text": record[7],
-                            "comment": record[8],
-                            "page_id": record[9],
-                            "page_ns": record[10]
-                        }).to_string();
-                        let record_path = path_from_revision_id(revision_id);
-                        let mut out_file = OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&record_path)
-                            .unwrap();
+                        // compress the revision
+                        let compressed_bytes = {
+                            let record_string = json!({
+                                "id": record[0],
+                                "parent_id": record[1],
+                                "page_title": record[2],
+                                "contributor_id": record[3],
+                                "contributor_name": record[4],
+                                "contributor_ip": record[5],
+                                "timestamp": record[6],
+                                "text": record[7],
+                                "comment": record[8],
+                                "page_id": record[9],
+                                "page_ns": record[10]
+                            }).to_string();
 
-                        out_file.lock_exclusive().unwrap();
-                        let record_start = out_file.metadata().unwrap().len();
-                        {
-                            let mut s = Vec::new();
+                            let mut v = Vec::new();
                             {
-                                let mut writer = write::BrotliEncoder::new(&mut s, BROTLI_COMPRESSION_LEVEL);
+                                let mut writer = write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
                                 writer.write_all(record_string.as_bytes()).unwrap();
                             }
-                            out_file.write_all(&s).unwrap();
-                            out_file.flush().unwrap();
-                        }
-                        let record_end = out_file.metadata().unwrap().len();
-                        out_file.unlock().unwrap();
+                            v
+                        };
 
-                        // populate id to position map
+                        // write the compressed revision out
+                        let mut out_file = file_locks[(revision_id % N_REVISION_FILES) as usize].lock().unwrap();
+                        let record_start = out_file.metadata().unwrap().len();
+                        out_file.write_all(&compressed_bytes).unwrap();
+                        out_file.flush().unwrap();
+
+                        // keep track of where each revision was written
+                        let record_end = out_file.metadata().unwrap().len();
                         let record_length = record_end - record_start;
                         (record_start, record_length)
                     };
 
-                    // populate date to position map after return
+                    // send summary info for constructing date & id mappings.
                     let date = DateTime::parse_from_rfc3339(&record[6]).unwrap();
                     (date, revision_id, (record_start, record_length))
                 }
@@ -254,10 +255,9 @@ fn revisions_csv_to_files<'a>(input_path: &'a str, dates_to_ids: Arc<Mutex<Dates
                 id_map.insert(revision_id, position);
             }
         );
-
 }
 
-fn monitor_input_pipes(
+fn process_input_pipes(
     downloader_receiver: Receiver<bool>
 ) {
     let pipe_dir = "/pipes";
@@ -269,6 +269,19 @@ fn monitor_input_pipes(
     let dates_to_ids: Arc<Mutex<DatesToIds>> = Default::default();
     let ids_to_positions: Arc<Mutex<IdsToPositions>> = Default::default();
     let mut processor_threads = Vec::new();
+    let file_locks = {
+        let mut inner_file_locks = Vec::new();
+        for i in 0..N_REVISION_FILES {
+            let path = format!(
+                "{}/{}",
+                STORAGE_DIR,
+                i
+            );
+            let f = File::create(path).unwrap();
+            inner_file_locks.push(Mutex::new(f));
+        }
+        Arc::new(inner_file_locks)
+    };
 
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
     // thread devoted to reading its contents into the storage directory.
@@ -278,8 +291,9 @@ fn monitor_input_pipes(
             let name = entry.file_name().into_string().unwrap();
             if re.is_match(&name) && !pending_receivers.contains_key(&name) {
                 let (tx, rx) = bounded(1);
-                let dates_to_positions = Arc::clone(&dates_to_ids);
+                let dates_to_ids = Arc::clone(&dates_to_ids);
                 let ids_to_positions = Arc::clone(&ids_to_positions);
+                let file_locks = Arc::clone(&file_locks);
                 processor_threads.push(
                     thread::spawn(
                         move || {
@@ -287,8 +301,9 @@ fn monitor_input_pipes(
                             let path = entry_path.to_str().unwrap();
                             revisions_csv_to_files(
                                 path,
-                                dates_to_positions,
-                                ids_to_positions
+                                dates_to_ids,
+                                ids_to_positions,
+                                file_locks
                             );
                             remove_file(path).unwrap();
                             tx.send(true).unwrap();
@@ -301,7 +316,7 @@ fn monitor_input_pipes(
         }
 
         if !one_found {
-            println!("[monitor_input_pipes] awaiting revision pipes...");
+            println!("[process_input_pipes] awaiting revision pipes...");
             thread::sleep(Duration::from_secs(60))
         } else if pending_receivers.is_empty() {
             complete = true;
@@ -356,7 +371,7 @@ fn monitor_input_pipes(
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(date: String) {
     let downloader_receiver = {
-        let num_cores = format!("{}", cmp::max(num_cpus::get() - 1, 4));
+        let num_subprocesses = format!("{}", cmp::max(num_cpus::get() * 3, 4));
         let (tx, rx) = bounded(1);
 
         thread::spawn(
@@ -365,7 +380,7 @@ fn download_revisions(date: String) {
                 let status = Command::new("/src/download")
                     .arg(WORKING_DIR)
                     .arg(&date)
-                    .arg(&num_cores)
+                    .arg(&num_subprocesses)
                     .status()
                     .unwrap();
                 if !status.success() {
@@ -380,7 +395,7 @@ fn download_revisions(date: String) {
         rx
     };
 
-    monitor_input_pipes(downloader_receiver);
+    process_input_pipes(downloader_receiver);
 }
 
 fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Result<bytes::Bytes>>
@@ -451,13 +466,12 @@ fn main() {
 
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
-        create_dir_all(STORAGE_DIR).unwrap();
         download_revisions(
             date.to_string()
         );
     }
 
-    // instantiate global state object so that the first request is not slow
+    // instantiate global state object so it's ready before the first request
     STATE.get_revision(1);
 
     // start server
