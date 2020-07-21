@@ -14,8 +14,11 @@ Run (specifying working & storage directories):
 docker run -v /Volumes/doggo:/working_dir -v /Volumes/burkart-6tb/wiki_revisions:/storage_dir wikipedia-revisions-server -d 20200601
 ```
 
-If the revisions are already downloaded in the correct format, just 
-point to them:
+If the revisions are already downloaded in the correct format, just mount their directory as storage_dir:
 ```shell
 docker run -v /Volumes/burkart-6tb/wiki_revisions:/storage_dir wikipedia-revisions-server
 ```
+
+To find a valid date (-d param), go to the [wiki archives](https://dumps.wikimedia.org/enwiki/) and find a date with available .xml.bz2 files to download for "All pages with complete page edit history"
+
+See the python [wikipedia revisions](https://github.com/dominicburkart/wikipedia-revisions) repo for different download targets & schemes than those available here.
