@@ -2,7 +2,7 @@ use std::thread;
 use std::process::Command;
 use std::fs::{File, remove_file, read_dir};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write, BufReader, SeekFrom, Seek};
+use std::io::{Read, Write, BufReader, BufWriter, SeekFrom, Seek};
 use std::cmp;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,8 @@ fn revisions_csv_to_files<'a>(
     input_path: &'a str,
     dates_to_ids: Arc<Mutex<DatesToIds>>,
     ids_to_positions: Arc<Mutex<IdsToPositions>>,
-    file_locks: Arc<Vec<Mutex<File>>>
+    writer_locks: Arc<Vec<Mutex<BufWriter<File>>>>,
+    size_locks: Arc<Vec<Mutex<u64>>>
 ) {
     let mut records_vec: Vec<(Instant, u64, Position)> = {
         let f = File::open(&input_path).unwrap();
@@ -218,14 +219,13 @@ fn revisions_csv_to_files<'a>(
                         };
 
                         // write the compressed revision out
-                        let mut out_file = file_locks[(revision_id % N_REVISION_FILES) as usize].lock().unwrap();
-                        let record_start = out_file.metadata().unwrap().len();
-                        out_file.write_all(&compressed_bytes).unwrap();
-                        out_file.flush().unwrap();
-
-                        // keep track of where each revision was written
-                        let record_end = out_file.metadata().unwrap().len();
-                        let record_length = record_end - record_start;
+                        let lock_index = (revision_id % N_REVISION_FILES) as usize;
+                        let mut write_guard = writer_locks[lock_index].lock().unwrap();
+                        let mut size_guard = size_locks[lock_index].lock().unwrap();
+                        let record_start = *size_guard;
+                        let record_length = compressed_bytes.len() as u64;
+                        write_guard.write_all(&compressed_bytes).unwrap();
+                        *size_guard += record_length;
                         (record_start, record_length)
                     };
 
@@ -237,7 +237,7 @@ fn revisions_csv_to_files<'a>(
             .collect()
     };
 
-    println!("pipe read for {} completed. saving date index...", input_path);
+    println!("pipe read for {} completed. saving indices... 🎸", input_path);
 
     let mut date_map = dates_to_ids.lock().unwrap();
     let mut id_map = ids_to_positions.lock().unwrap();
@@ -269,8 +269,8 @@ fn process_input_pipes(
     let dates_to_ids: Arc<Mutex<DatesToIds>> = Default::default();
     let ids_to_positions: Arc<Mutex<IdsToPositions>> = Default::default();
     let mut processor_threads = Vec::new();
-    let file_locks = {
-        let mut inner_file_locks = Vec::new();
+    let writer_locks = {
+        let mut inner_locks = Vec::new();
         for i in 0..N_REVISION_FILES {
             let path = format!(
                 "{}/{}",
@@ -278,9 +278,17 @@ fn process_input_pipes(
                 i
             );
             let f = File::create(path).unwrap();
-            inner_file_locks.push(Mutex::new(f));
+            let buf = BufWriter::with_capacity(2 * 1024 * 1024,f);
+            inner_locks.push(Mutex::new(buf));
         }
-        Arc::new(inner_file_locks)
+        Arc::new(inner_locks)
+    };
+    let size_locks = {
+        let mut inner_locks = Vec::new();
+        for _ in 0..N_REVISION_FILES {
+            inner_locks.push(Mutex::new(0));
+        }
+        Arc::new(inner_locks)
     };
 
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
@@ -293,7 +301,8 @@ fn process_input_pipes(
                 let (tx, rx) = bounded(1);
                 let dates_to_ids = Arc::clone(&dates_to_ids);
                 let ids_to_positions = Arc::clone(&ids_to_positions);
-                let file_locks = Arc::clone(&file_locks);
+                let writer_locks = Arc::clone(&writer_locks);
+                let size_locks = Arc::clone(&size_locks);
                 processor_threads.push(
                     thread::spawn(
                         move || {
@@ -303,7 +312,8 @@ fn process_input_pipes(
                                 path,
                                 dates_to_ids,
                                 ids_to_positions,
-                                file_locks
+                                writer_locks,
+                                size_locks
                             );
                             remove_file(path).unwrap();
                             tx.send(true).unwrap();
@@ -349,6 +359,16 @@ fn process_input_pipes(
         handle.join().unwrap()
     }
 
+    // empty file buffers
+    writer_locks
+        .iter()
+        .for_each(
+            |mutex| {
+                let mut writer = mutex.lock().unwrap();
+                writer.flush().unwrap();
+            }
+        );
+
     // save date to id map
     let date_map_file = File::create(
         DATES_TO_IDS_FILE
@@ -371,7 +391,7 @@ fn process_input_pipes(
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(date: String) {
     let downloader_receiver = {
-        let num_subprocesses = format!("{}", cmp::max(num_cpus::get() * 3, 4));
+        let num_subprocesses = format!("{}", cmp::max((num_cpus::get() * 2) - 2, 4));
         let (tx, rx) = bounded(1);
 
         thread::spawn(
