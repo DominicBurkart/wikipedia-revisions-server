@@ -34,7 +34,7 @@ const WORKING_DIR: &str = "/working_dir";
 const STORAGE_DIR: &str = "/storage_dir";
 const DATES_TO_IDS_FILE: &str = "/storage_dir/date_map.json";
 const IDS_TO_POSITIONS_FILE: &str = "/storage_dir/id_map.json";
-const N_REVISION_FILES: u64 = 200;
+const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
 
 type RevisionID = u64;
 type ContributorID = u64;
