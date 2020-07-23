@@ -295,7 +295,7 @@ fn process_input_pipes(
                 i
             );
             let f = File::create(path).unwrap();
-            let buf = BufWriter::with_capacity(2 * 1024 * 1024,f);
+            let buf = BufWriter::with_capacity(1024 * 1024,f);
             let writer_counter = WriteCounter {
                 writer: buf,
                 size: 0
