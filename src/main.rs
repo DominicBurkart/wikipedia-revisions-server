@@ -26,6 +26,7 @@ use futures::stream::{self, Stream};
 use bytes::Bytes;
 #[macro_use]
 extern crate lazy_static;
+use colored::*;
 
 const BROTLI_COMPRESSION_LEVEL: u32 = 9;
 const WORKING_DIR: &str = "/working_dir";
@@ -137,7 +138,7 @@ impl State {
 
 lazy_static! {
     pub static ref STATE: State = {
-        println!("loading state...");
+        log("loading state...");
         let serialized_date_map = File::open(DATES_TO_IDS_FILE).unwrap();
         let serialized_id_map = File::open(IDS_TO_POSITIONS_FILE).unwrap();
         State {
@@ -250,7 +251,7 @@ fn revisions_csv_to_files<'a>(
             .collect()
     };
 
-    println!("pipe read for {} completed. saving indices... 🎸", input_path);
+    log(&format!("pipe read for {} completed. saving indices... 🎸", input_path));
 
     let mut date_map = dates_to_ids.lock().unwrap();
     let mut id_map = ids_to_positions.lock().unwrap();
@@ -269,7 +270,7 @@ fn revisions_csv_to_files<'a>(
             }
         );
 
-    println!("indices from pipe {} saved. 👩‍🎤", input_path);
+    log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
 
 fn process_input_pipes(
@@ -336,7 +337,7 @@ fn process_input_pipes(
         }
 
         if !one_found {
-            println!("[process_input_pipes] awaiting revision pipes...");
+            log("[process_input_pipes] awaiting revision pipes...");
             thread::sleep(Duration::from_secs(60))
         } else if pending_receivers.is_empty() {
             complete = true;
@@ -406,7 +407,7 @@ fn download_revisions(date: String) {
 
         thread::spawn(
             move || {
-                println!("starting downloader program...");
+                log("starting downloader program...");
                 let status = Command::new("/src/download")
                     .arg(WORKING_DIR)
                     .arg(&date)
@@ -473,6 +474,10 @@ async fn server(bind: String) -> std::io::Result<()> {
         .bind(&bind)?
         .run()
         .await
+}
+
+fn log(s: &str) {
+    println!("{}", s.magenta().on_blue());
 }
 
 fn main() {
