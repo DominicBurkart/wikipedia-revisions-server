@@ -31,6 +31,7 @@ use colored::*;
 const BROTLI_COMPRESSION_LEVEL: u32 = 9;
 const WORKING_DIR: &str = "/working_dir";
 const STORAGE_DIR: &str = "/storage_dir";
+const PIPE_DIR: &str = "/pipes";
 const DATES_TO_IDS_FILE: &str = "/storage_dir/date_map.json";
 const IDS_TO_POSITIONS_FILE: &str = "/storage_dir/id_map.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
@@ -402,7 +403,7 @@ fn process_input_pipes(
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(date: String) {
     let downloader_receiver = {
-        let num_subprocesses = format!("{}", cmp::max((num_cpus::get() * 2) - 2, 4));
+        let num_subprocesses = format!("{}", cmp::max(num_cpus::get() * 2, 4));
         let (tx, rx) = bounded(1);
 
         thread::spawn(
@@ -412,6 +413,7 @@ fn download_revisions(date: String) {
                     .arg(WORKING_DIR)
                     .arg(&date)
                     .arg(&num_subprocesses)
+                    .arg(PIPE_DIR)
                     .status()
                     .unwrap();
                 if !status.success() {
