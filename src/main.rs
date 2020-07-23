@@ -151,6 +151,22 @@ lazy_static! {
     };
 }
 
+struct WriteCounter {
+    writer: BufWriter<File>,
+    size: u64
+}
+
+impl WriteCounter {
+    fn write<'a>(&mut self, bytes: &'a [u8]) {
+        self.writer.write_all(bytes).unwrap();
+        self.size += bytes.len() as u64;
+    }
+
+    fn flush(&mut self) {
+        self.writer.flush().unwrap();
+    }
+}
+
 fn path_from_revision_id(id: RevisionID) -> String {
     format!(
         "{}/{}",
@@ -163,8 +179,7 @@ fn revisions_csv_to_files<'a>(
     input_path: &'a str,
     dates_to_ids: Arc<Mutex<DatesToIds>>,
     ids_to_positions: Arc<Mutex<IdsToPositions>>,
-    writer_locks: Arc<Vec<Mutex<BufWriter<File>>>>,
-    size_locks: Arc<Vec<Mutex<u64>>>
+    writer_locks: Arc<Vec<Mutex<WriteCounter>>>
 ) {
     let mut records_vec: Vec<(Instant, u64, Position)> = {
         let f = File::open(&input_path).unwrap();
@@ -221,11 +236,9 @@ fn revisions_csv_to_files<'a>(
                         // write the compressed revision out
                         let lock_index = (revision_id % N_REVISION_FILES) as usize;
                         let mut write_guard = writer_locks[lock_index].lock().unwrap();
-                        let mut size_guard = size_locks[lock_index].lock().unwrap();
-                        let record_start = *size_guard;
+                        let record_start = write_guard.size;
                         let record_length = compressed_bytes.len() as u64;
-                        write_guard.write_all(&compressed_bytes).unwrap();
-                        *size_guard += record_length;
+                        write_guard.write(&compressed_bytes);
                         (record_start, record_length)
                     };
 
@@ -255,6 +268,8 @@ fn revisions_csv_to_files<'a>(
                 id_map.insert(revision_id, position);
             }
         );
+
+    println!("indices from pipe {} saved. 👩‍🎤", input_path);
 }
 
 fn process_input_pipes(
@@ -279,14 +294,11 @@ fn process_input_pipes(
             );
             let f = File::create(path).unwrap();
             let buf = BufWriter::with_capacity(2 * 1024 * 1024,f);
-            inner_locks.push(Mutex::new(buf));
-        }
-        Arc::new(inner_locks)
-    };
-    let size_locks = {
-        let mut inner_locks = Vec::new();
-        for _ in 0..N_REVISION_FILES {
-            inner_locks.push(Mutex::new(0));
+            let writer_counter = WriteCounter {
+                writer: buf,
+                size: 0
+            };
+            inner_locks.push(Mutex::new(writer_counter));
         }
         Arc::new(inner_locks)
     };
@@ -302,7 +314,6 @@ fn process_input_pipes(
                 let dates_to_ids = Arc::clone(&dates_to_ids);
                 let ids_to_positions = Arc::clone(&ids_to_positions);
                 let writer_locks = Arc::clone(&writer_locks);
-                let size_locks = Arc::clone(&size_locks);
                 processor_threads.push(
                     thread::spawn(
                         move || {
@@ -312,8 +323,7 @@ fn process_input_pipes(
                                 path,
                                 dates_to_ids,
                                 ids_to_positions,
-                                writer_locks,
-                                size_locks
+                                writer_locks
                             );
                             remove_file(path).unwrap();
                             tx.send(true).unwrap();
@@ -365,7 +375,7 @@ fn process_input_pipes(
         .for_each(
             |mutex| {
                 let mut writer = mutex.lock().unwrap();
-                writer.flush().unwrap();
+                writer.flush();
             }
         );
 
