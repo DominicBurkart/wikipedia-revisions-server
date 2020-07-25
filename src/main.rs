@@ -185,7 +185,7 @@ fn revisions_csv_to_files<'a>(
 ) {
     let mut records_vec: Vec<(Instant, u64, Position)> = {
         let f = File::open(&input_path).unwrap();
-        let buf = BufReader::new(f);
+        let buf = BufReader::with_capacity(2 * 1024 * 1024,f);
         let reader = Reader::from_reader(buf);
 
         reader
@@ -403,7 +403,13 @@ fn process_input_pipes(
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(date: String) {
     let downloader_receiver = {
-        let num_subprocesses = format!("{}", cmp::max(num_cpus::get() * 2, 4));
+        let num_subprocesses = format!(
+            "{}",
+            cmp::max(
+                num_cpus::get() / 2,
+                2
+            )
+        );
         let (tx, rx) = bounded(1);
 
         thread::spawn(
