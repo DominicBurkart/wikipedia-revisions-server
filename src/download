@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# args: working directory, dump date (YYYYMMDD), num subprocesses
+# args: working directory, dump date (YYYYMMDD), num subprocesses, pipe directory
 
 cd $1 &&
 nice -n 5 pypy3 -u -m wikipedia_revisions.download --date $2 --num-subprocesses $3 --pipe-dir $4

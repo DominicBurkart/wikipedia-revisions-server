@@ -2,22 +2,18 @@ use std::thread;
 use std::process::Command;
 use std::fs::{File, remove_file, read_dir};
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write, BufReader, BufWriter, SeekFrom, Seek};
+use std::io::{Read, Write, BufWriter, SeekFrom, Seek};
 use std::cmp;
 use std::time::Duration;
 use std::sync::{Arc, Mutex};
 use std::default::Default;
 use std::convert::TryFrom;
 
-use csv::Reader;
+use csv::{Reader, StringRecord};
 use serde_json::json;
 use chrono::{DateTime, FixedOffset};
 use brotli2::write;
-extern crate num_cpus;
-extern crate clap;
 use clap::{Arg, App};
-use rayon::iter::ParallelBridge;
-use rayon::prelude::ParallelIterator;
 use regex::Regex;
 use crossbeam::crossbeam_channel::{Receiver, Select, bounded};
 use serde::{Serialize, Deserialize};
@@ -28,7 +24,7 @@ use bytes::Bytes;
 extern crate lazy_static;
 use colored::*;
 
-const BROTLI_COMPRESSION_LEVEL: u32 = 9;
+const BROTLI_COMPRESSION_LEVEL: u32 = 8;
 const WORKING_DIR: &str = "/working_dir";
 const STORAGE_DIR: &str = "/storage_dir";
 const PIPE_DIR: &str = "/pipes";
@@ -68,7 +64,11 @@ pub struct State {
 }
 
 impl State {
-    fn revision_ids_from_period<'a, 'b>(&'a self, start: &'b Instant, end: &'b Instant) -> impl Iterator<Item=RevisionID> + 'a {
+    fn revision_ids_from_period<'a, 'b>(
+        &'a self,
+        start: &'b Instant,
+        end: &'b Instant
+    ) -> impl Iterator<Item=RevisionID> + 'a {
         self
             .dates_to_ids
             .range(start..end)
@@ -77,13 +77,21 @@ impl State {
             .copied()
     }
 
-    fn revisions_from_period<'a, 'b>(&'a self, start: &'b Instant, end: &'b Instant) -> impl Iterator<Item=Revision> + 'a {
+    fn revisions_from_period<'a, 'b>(
+        &'a self,
+        start: &'b Instant,
+        end: &'b Instant
+    ) -> impl Iterator<Item=Revision> + 'a {
         self
             .revision_ids_from_period(start, end)
             .map(move |id| self.get_revision(id))
     }
 
-    fn diffs_for_period<'a, 'b>(&'a self, start: &'b Instant, end: &'b Instant) -> impl Iterator<Item=Vec<String>> + 'a {
+    fn diffs_for_period<'a, 'b>(
+        &'a self,
+        start: &'b Instant,
+        end: &'b Instant
+    ) -> impl Iterator<Item=Vec<String>> + 'a {
         self
             .revision_ids_from_period(start, end)
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -159,13 +167,14 @@ struct WriteCounter {
 }
 
 impl WriteCounter {
-    fn write<'a>(&mut self, bytes: &'a [u8]) {
-        self.writer.write_all(bytes).unwrap();
+    fn write_all<'a>(&mut self, bytes: &'a [u8]) -> std::io::Result<()> {
+        self.writer.write_all(bytes)?;
         self.size += bytes.len() as u64;
+        Ok(())
     }
 
-    fn flush(&mut self) {
-        self.writer.flush().unwrap();
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
     }
 }
 
@@ -177,6 +186,42 @@ fn path_from_revision_id(id: RevisionID) -> String {
     )
 }
 
+fn revision_to_bytes(record: &StringRecord) -> Vec<u8> {
+    let record_string = json!({
+        "id": record[0],
+        "parent_id": record[1],
+        "page_title": record[2],
+        "contributor_id": record[3],
+        "contributor_name": record[4],
+        "contributor_ip": record[5],
+        "timestamp": record[6],
+        "text": record[7],
+        "comment": record[8],
+        "page_id": record[9],
+        "page_ns": record[10]
+    }).to_string();
+
+    let mut v = Vec::new();
+    {
+        let mut writer = write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
+        writer.write_all(record_string.as_bytes()).unwrap();
+    }
+    v
+}
+
+fn write_compressed_revision(
+    compressed_bytes: Vec<u8>,
+    mut write_guard: std::sync::MutexGuard<WriteCounter>
+) -> (u64, u64) {
+    let record_start = {
+        let record_start = write_guard.size;
+        write_guard.write_all(&compressed_bytes).unwrap();
+        record_start
+    };
+    let record_length = compressed_bytes.len() as u64;
+    (record_start, record_length)
+}
+
 fn revisions_csv_to_files<'a>(
     input_path: &'a str,
     dates_to_ids: Arc<Mutex<DatesToIds>>,
@@ -184,14 +229,11 @@ fn revisions_csv_to_files<'a>(
     writer_locks: Arc<Vec<Mutex<WriteCounter>>>
 ) {
     let mut records_vec: Vec<(Instant, u64, Position)> = {
-        let f = File::open(&input_path).unwrap();
-        let buf = BufReader::with_capacity(2 * 1024 * 1024,f);
-        let reader = Reader::from_reader(buf);
+        let reader = Reader::from_path(&input_path).unwrap();
 
         reader
             .into_records()
             .filter_map(Result::ok)
-            .par_bridge()
             .map(
                 |record| {
                     // row content:
@@ -208,40 +250,19 @@ fn revisions_csv_to_files<'a>(
                     //        "page_id",
                     //        "page_ns",
                     //    ]
+
                     // write record to file
                     let revision_id = RevisionID::from_str_radix(&record[0], 10).unwrap();
                     let (record_start, record_length) = {
-                        // compress the revision
-                        let compressed_bytes = {
-                            let record_string = json!({
-                                "id": record[0],
-                                "parent_id": record[1],
-                                "page_title": record[2],
-                                "contributor_id": record[3],
-                                "contributor_name": record[4],
-                                "contributor_ip": record[5],
-                                "timestamp": record[6],
-                                "text": record[7],
-                                "comment": record[8],
-                                "page_id": record[9],
-                                "page_ns": record[10]
-                            }).to_string();
-
-                            let mut v = Vec::new();
-                            {
-                                let mut writer = write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
-                                writer.write_all(record_string.as_bytes()).unwrap();
-                            }
-                            v
-                        };
-
-                        // write the compressed revision out
+                        let compressed_bytes = revision_to_bytes(&record);
                         let lock_index = (revision_id % N_REVISION_FILES) as usize;
-                        let mut write_guard = writer_locks[lock_index].lock().unwrap();
-                        let record_start = write_guard.size;
-                        let record_length = compressed_bytes.len() as u64;
-                        write_guard.write(&compressed_bytes);
-                        (record_start, record_length)
+
+                        let writer_lock = writer_locks.get(lock_index).unwrap();
+                        let write_guard = writer_lock.lock().unwrap();
+                        write_compressed_revision(
+                            compressed_bytes,
+                            write_guard
+                        )
                     };
 
                     // send summary info for constructing date & id mappings.
@@ -377,7 +398,7 @@ fn process_input_pipes(
         .for_each(
             |mutex| {
                 let mut writer = mutex.lock().unwrap();
-                writer.flush();
+                writer.flush().unwrap();
             }
         );
 
@@ -406,7 +427,7 @@ fn download_revisions(date: String) {
         let num_subprocesses = format!(
             "{}",
             cmp::max(
-                num_cpus::get() / 2,
+                num_cpus::get(),
                 2
             )
         );
@@ -514,7 +535,7 @@ fn main() {
         );
     }
 
-    // instantiate global state object so it's ready before the first request
+    // instantiate global state object before the server
     STATE.get_revision(1);
 
     // start server
@@ -524,3 +545,4 @@ fn main() {
         .to_string();
     server(bind).unwrap();
 }
+
