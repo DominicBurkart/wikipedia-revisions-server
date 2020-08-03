@@ -22,4 +22,4 @@ ENV RUST_BACKTRACE=1
 ENTRYPOINT ["./target/release/wikipedia-revisions-server"]
 
 # example use:
-# docker build -t wikipedia-revisions-server . && docker run -it -v /Volumes/doggo:/working_dir -v /Volumes/burkart-6tb/wiki_revisions:/storage_dir wikipedia-revisions-server -d 20200601
+# docker build -t wikipedia-revisions-server . && docker run -it -v /Volumes/doggo:/fast_dir -v /Volumes/burkart-6tb/wiki_revisions:/big_dir wikipedia-revisions-server -d 20200601

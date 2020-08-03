@@ -1,35 +1,35 @@
-use std::thread;
-use std::process::Command;
-use std::fs::{File, remove_file, read_dir};
-use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write, BufWriter, SeekFrom, Seek};
-use std::cmp;
-use std::time::Duration;
-use std::sync::{Arc, Mutex};
-use std::default::Default;
-use std::convert::TryFrom;
-
-use csv::{Reader, StringRecord};
-use serde_json::json;
-use chrono::{DateTime, FixedOffset};
-use brotli2::write;
-use clap::{Arg, App};
-use regex::Regex;
-use crossbeam::crossbeam_channel::{Receiver, Select, bounded};
-use serde::{Serialize, Deserialize};
-use actix_web::{get, web, App as ActixApp, HttpServer, HttpResponse, Responder, middleware};
-use futures::stream::{self, Stream};
+use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
 use bytes::Bytes;
+use chrono::{DateTime, FixedOffset, Utc};
+use clap::{App, Arg};
+use colored::*;
+use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
+use futures::stream::{self, Stream};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::cmp;
+use std::collections::{BTreeMap, HashMap};
+use std::convert::TryFrom;
+use std::default::Default;
+use std::error::Error;
+use std::fs::{File, read_dir, remove_file};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
 #[macro_use]
 extern crate lazy_static;
-use colored::*;
 
+const BUF_SIZE: usize = 512 * 1024;
 const BROTLI_COMPRESSION_LEVEL: u32 = 8;
-const WORKING_DIR: &str = "/working_dir";
-const STORAGE_DIR: &str = "/storage_dir";
+const FAST_DIR: &str = "/fast_dir";
+const BIG_DIR: &str = "/big_dir";
 const PIPE_DIR: &str = "/pipes";
-const DATES_TO_IDS_FILE: &str = "/storage_dir/date_map.json";
-const IDS_TO_POSITIONS_FILE: &str = "/storage_dir/id_map.json";
+const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
+const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
 // ^ must be less than max usize.
 
@@ -39,9 +39,9 @@ type PageID = u64;
 type Instant = DateTime<FixedOffset>;
 type Offset = u64;
 type RecordLength = u64;
-type Position = (Offset, RecordLength); // position of record in corresponding file
-type DatesToIds = BTreeMap<Instant, Vec<RevisionID>>;
-type IdsToPositions = HashMap<RevisionID, Position>;
+type RecordFileName = String;
+type Position = (RecordFileName, Offset, RecordLength);
+// position of record in corresponding file
 
 #[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
 struct Revision {
@@ -55,45 +55,110 @@ struct Revision {
     text: Option<String>,
     comment: Option<String>,
     page_id: PageID,
-    page_ns: u32
+    page_ns: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PositionEntry {
+    revision_id: RevisionID,
+    record_start: Offset,
+    record_length: RecordLength,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DateEntry {
+    revision_id: RevisionID,
+    instant: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetrievalError {}
+
+impl std::fmt::Display for RetrievalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "retrieval error while trying to access revisions on disk")
+    }
+}
+
+impl Error for RetrievalError {}
+
 pub struct State {
-    dates_to_ids: Arc<DatesToIds>,
-    ids_to_positions: Arc<IdsToPositions>
+    starting_date_per_index: BTreeMap<Instant, String>
 }
 
 impl State {
-    fn revision_ids_from_period<'a, 'b>(
-        &'a self,
-        start: &'b Instant,
-        end: &'b Instant
-    ) -> impl Iterator<Item=RevisionID> + 'a {
-        self
-            .dates_to_ids
-            .range(start..end)
-            .map(|(_date, ids)| ids)
-            .flatten()
-            .copied()
+    fn id_to_position(&self, id: RevisionID) -> Result<Position, Box<dyn Error>> {
+        let index_path = position_map_file_from_id(id);
+        let index_file = File::open(index_path)?;
+        let index_buf = BufReader::with_capacity(BUF_SIZE, index_file);
+        let mut reader = csv::Reader::from_reader(index_buf);
+        for result in reader.deserialize() {
+            let record: PositionEntry = result?;
+            if record.revision_id == id {
+                return Ok((path_from_revision_id(id), record.record_start, record.record_length));
+            }
+        }
+        Err(RetrievalError {}.into())
     }
 
-    fn revisions_from_period<'a, 'b>(
+
+    fn revision_ids_from_period<'a>(
         &'a self,
-        start: &'b Instant,
-        end: &'b Instant
+        start: Instant,
+        end: Instant,
+    ) -> impl Iterator<Item=Vec<RevisionID>> + 'a {
+        let prior_start = self
+            .starting_date_per_index
+            .range(..start)
+            .map(|(instant, _path)| instant)
+            .next_back()
+            .unwrap();
+
+        let final_end = self
+            .starting_date_per_index
+            .range(end..)
+            .map(|(instant, _path)| instant)
+            .next()
+            .unwrap();
+
+        self
+            .starting_date_per_index
+            .range(prior_start..final_end)
+            .map(move |(_date, path)| {
+                let time_indices: BTreeMap<Instant, Vec<RevisionID>> = {
+                    let f = File::open(path).unwrap();
+                    let buf = BufReader::with_capacity(BUF_SIZE, f);
+                    serde_json::from_reader(buf).unwrap()
+                };
+                let ids: Vec<RevisionID> = time_indices
+                    .range(start..end)
+                    .map(|(_date, ids)| ids)
+                    .flatten()
+                    .copied()
+                    .collect();
+                ids
+            })
+    }
+
+    fn revisions_from_period<'a>(
+        &'a self,
+        start: Instant,
+        end: Instant,
     ) -> impl Iterator<Item=Revision> + 'a {
         self
             .revision_ids_from_period(start, end)
+            .flatten()
             .map(move |id| self.get_revision(id))
     }
 
-    fn diffs_for_period<'a, 'b>(
+    fn diffs_for_period<'a>(
         &'a self,
-        start: &'b Instant,
-        end: &'b Instant
+        start: Instant,
+        end: Instant,
     ) -> impl Iterator<Item=Vec<String>> + 'a {
         self
             .revision_ids_from_period(start, end)
+            .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
     }
 
@@ -101,13 +166,10 @@ impl State {
         // todo should return a Result, but I wasn't sure what the error type should be
         let uncompressed_serialized_revision = {
             let compressed_revision = {
-                let mut file = File::open(
-                    &path_from_revision_id(id)
-                ).unwrap();
-
-                let (offset, length) = self.ids_to_positions.get(&id).unwrap();
-                let mut compressed_revision = vec![0; usize::try_from(*length).unwrap()];
-                file.seek(SeekFrom::Start(*offset)).unwrap();
+                let (path, offset, length) = self.id_to_position(id).unwrap();
+                let mut file = File::open(&path).unwrap();
+                let mut compressed_revision = vec![0; usize::try_from(length).unwrap()];
+                file.seek(SeekFrom::Start(offset)).unwrap();
                 file.read_exact(&mut compressed_revision).unwrap();
                 compressed_revision
             };
@@ -143,27 +205,29 @@ impl State {
             }
         }
     }
+
 }
 
 lazy_static! {
     pub static ref STATE: State = {
-        log("loading state...");
-        let serialized_date_map = File::open(DATES_TO_IDS_FILE).unwrap();
-        let serialized_id_map = File::open(IDS_TO_POSITIONS_FILE).unwrap();
+        log("initializing state... ");
+        let f = File::open(SUPER_DATE_BTREE_FILE).unwrap();
+        let buf = BufReader::with_capacity(BUF_SIZE, f);
+        let super_map: BTreeMap<Instant, String> = serde_json::from_reader(buf).unwrap();
         State {
-            dates_to_ids: Arc::new(
-                serde_json::from_reader(serialized_date_map).unwrap()
-            ),
-            ids_to_positions: Arc::new(
-                serde_json::from_reader(serialized_id_map).unwrap()
-            )
+            starting_date_per_index: super_map
         }
+    };
+
+    pub static ref BUCKET_FROM_LITTLE_MAP_PACK: Regex = {
+        let pattern = format!(r"{}/(\d+)_temp_date_mapping.csv", FAST_DIR);
+        Regex::new(&pattern).unwrap()
     };
 }
 
 struct WriteCounter {
     writer: BufWriter<File>,
-    size: u64
+    size: u64,
 }
 
 impl WriteCounter {
@@ -181,12 +245,20 @@ impl WriteCounter {
 fn path_from_revision_id(id: RevisionID) -> String {
     format!(
         "{}/{}",
-        STORAGE_DIR,
+        BIG_DIR,
         id % N_REVISION_FILES
     )
 }
 
-fn revision_to_bytes(record: &StringRecord) -> Vec<u8> {
+fn position_map_file_from_id(id: RevisionID) -> String {
+    format!(
+        "{}/{}_maps.csv",
+        FAST_DIR,
+        id % N_REVISION_FILES
+    )
+}
+
+fn revision_to_bytes(record: &csv::StringRecord) -> Vec<u8> {
     let record_string = json!({
         "id": record[0],
         "parent_id": record[1],
@@ -203,7 +275,7 @@ fn revision_to_bytes(record: &StringRecord) -> Vec<u8> {
 
     let mut v = Vec::new();
     {
-        let mut writer = write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
+        let mut writer = brotli2::write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
         writer.write_all(record_string.as_bytes()).unwrap();
     }
     v
@@ -211,7 +283,7 @@ fn revision_to_bytes(record: &StringRecord) -> Vec<u8> {
 
 fn write_compressed_revision(
     compressed_bytes: Vec<u8>,
-    mut write_guard: std::sync::MutexGuard<WriteCounter>
+    mut write_guard: std::sync::MutexGuard<WriteCounter>,
 ) -> (u64, u64) {
     let record_start = {
         let record_start = write_guard.size;
@@ -224,12 +296,12 @@ fn write_compressed_revision(
 
 fn revisions_csv_to_files<'a>(
     input_path: &'a str,
-    dates_to_ids: Arc<Mutex<DatesToIds>>,
-    ids_to_positions: Arc<Mutex<IdsToPositions>>,
-    writer_locks: Arc<Vec<Mutex<WriteCounter>>>
+    dates_to_ids: Arc<Mutex<csv::Writer<BufWriter<File>>>>,
+    ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
+    writer_locks: Arc<Vec<Mutex<WriteCounter>>>,
 ) {
-    let mut records_vec: Vec<(Instant, u64, Position)> = {
-        let reader = Reader::from_path(&input_path).unwrap();
+    let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
+        let reader = csv::Reader::from_path(&input_path).unwrap();
 
         reader
             .into_records()
@@ -261,13 +333,13 @@ fn revisions_csv_to_files<'a>(
                         let write_guard = writer_lock.lock().unwrap();
                         write_compressed_revision(
                             compressed_bytes,
-                            write_guard
+                            write_guard,
                         )
                     };
 
                     // send summary info for constructing date & id mappings.
                     let date = DateTime::parse_from_rfc3339(&record[6]).unwrap();
-                    (date, revision_id, (record_start, record_length))
+                    (date, revision_id, record_start, record_length)
                 }
             )
             .collect()
@@ -275,25 +347,107 @@ fn revisions_csv_to_files<'a>(
 
     log(&format!("pipe read for {} completed. saving indices... 🎸", input_path));
 
-    let mut date_map = dates_to_ids.lock().unwrap();
-    let mut id_map = ids_to_positions.lock().unwrap();
+    let mut date_writer = dates_to_ids.lock().unwrap();
+    let mut id_map_writers = ids_to_positions.lock().unwrap();
     records_vec
         .drain(..)
         .for_each(
-            |(date, revision_id, position)| {
+            |(instant, revision_id, record_start, record_length)| {
                 // populate date_map
-                date_map
-                    .entry(date)
-                    .or_insert_with(Vec::new)
-                    .push(revision_id);
+                date_writer
+                    .serialize(
+                        DateEntry {
+                            revision_id,
+                            instant,
+                        }
+                    )
+                    .unwrap();
 
-                // populate id_map
-                id_map.insert(revision_id, position);
+                // populate id map
+                let index_file = (revision_id % N_REVISION_FILES) as usize;
+                id_map_writers[index_file]
+                    .serialize(
+                        PositionEntry {
+                            revision_id,
+                            record_start,
+                            record_length,
+                        }
+                    )
+                    .unwrap();
             }
         );
 
     log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
+
+fn all_revisions_files() -> impl Iterator<Item=String> {
+    (0..N_REVISION_FILES)
+        .map(
+            |i| format!(
+                "{}/{}",
+                BIG_DIR,
+                i
+            )
+        )
+}
+
+fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
+    (0..N_REVISION_FILES)
+        .map(
+            |i| format!(
+                "{}/{}_maps.csv",
+                FAST_DIR,
+                i
+            )
+        )
+}
+
+fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
+    (1..(N_REVISION_FILES + 1))
+        .map(
+            |i| format!(
+                "{}/{}_temp_date_mapping.csv",
+                FAST_DIR,
+                i
+            )
+        )
+}
+
+fn temporary_little_date_file_path_to_date_to_id_path(little_file_path: &str) -> String {
+    let bucket = BUCKET_FROM_LITTLE_MAP_PACK
+        .captures(little_file_path)
+        .unwrap()
+        .get(0)
+        .unwrap()
+        .as_str();
+    format!(
+        "{}/{}_date_map.json",
+        FAST_DIR,
+        bucket
+    )
+}
+
+fn get_largest_id() -> RevisionID {
+    all_ids_to_positions_paths()
+        .map(
+            |path| {
+                let mut reader = csv::Reader::from_path(path).unwrap();
+                reader
+                    .deserialize()
+                    .map(
+                        |rec| {
+                            let position_entry: PositionEntry = rec.unwrap();
+                            position_entry.revision_id
+                        }
+                    )
+                    .max()
+                    .unwrap()
+            }
+        )
+        .max()
+        .unwrap()
+}
+
 
 fn process_input_pipes(
     downloader_receiver: Receiver<bool>
@@ -304,26 +458,41 @@ fn process_input_pipes(
     let re = Regex::new(r"revisions-\d+-\d+\.pipe").unwrap();
     let mut complete = false;
     let mut one_found = false;
-    let dates_to_ids: Arc<Mutex<DatesToIds>> = Default::default();
-    let ids_to_positions: Arc<Mutex<IdsToPositions>> = Default::default();
     let mut processor_threads = Vec::new();
     let writer_locks = {
         let mut inner_locks = Vec::new();
-        for i in 0..N_REVISION_FILES {
-            let path = format!(
-                "{}/{}",
-                STORAGE_DIR,
-                i
+        all_revisions_files()
+            .for_each(
+                |path| {
+                    let f = File::create(path).unwrap();
+                    let buf = BufWriter::with_capacity(BUF_SIZE, f);
+                    let writer_counter = WriteCounter {
+                        writer: buf,
+                        size: 0,
+                    };
+                    inner_locks.push(Mutex::new(writer_counter));
+                }
             );
-            let f = File::create(path).unwrap();
-            let buf = BufWriter::with_capacity(1024 * 1024,f);
-            let writer_counter = WriteCounter {
-                writer: buf,
-                size: 0
-            };
-            inner_locks.push(Mutex::new(writer_counter));
-        }
         Arc::new(inner_locks)
+    };
+    let ids_to_positions = {
+        let mut csv_writers = Vec::new();
+        all_ids_to_positions_paths()
+            .for_each(
+                |path| {
+                    let f = File::create(path).unwrap();
+                    let buf = BufWriter::with_capacity(BUF_SIZE, f);
+                    let csv_writer = csv::Writer::from_writer(buf);
+                    csv_writers.push(csv_writer);
+                }
+            );
+        Arc::new(Mutex::new(csv_writers))
+    };
+    let dates_to_ids = {
+        let path = DATES_TO_IDS_INTERMEDIARY_CSV;
+        let f = File::create(path).unwrap();
+        let buf = BufWriter::with_capacity(BUF_SIZE, f);
+        Arc::new(Mutex::new(csv::Writer::from_writer(buf)))
     };
 
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
@@ -346,7 +515,7 @@ fn process_input_pipes(
                                 path,
                                 dates_to_ids,
                                 ids_to_positions,
-                                writer_locks
+                                writer_locks,
                             );
                             remove_file(path).unwrap();
                             tx.send(true).unwrap();
@@ -401,24 +570,91 @@ fn process_input_pipes(
                 writer.flush().unwrap();
             }
         );
+    ids_to_positions
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .for_each(
+            |writer| writer.flush().unwrap()
+        );
+    dates_to_ids.lock().unwrap().flush().unwrap();
+    log("revision processing complete. generating date indices...");
 
-    // save date to id map
-    let date_map_file = File::create(
-        DATES_TO_IDS_FILE
-    ).unwrap();
-    serde_json::to_writer(
-        date_map_file,
-        &*dates_to_ids.lock().unwrap()
-    ).unwrap();
+    // *assuming that ids increase monotonically over time,*
+    // we can use the largest ID to split the ids by date.
+    let largest_id = get_largest_id();
+    let approx_bucket_size = largest_id / N_REVISION_FILES;
 
-    // save id to position map
-    let id_map_file = File::create(
-        IDS_TO_POSITIONS_FILE
-    ).unwrap();
-    serde_json::to_writer(
-        id_map_file,
-        &*ids_to_positions.lock().unwrap()
-    ).unwrap();
+    // split the big date file into little date files
+    let mut little_date_file_writers = {
+        let mut writers = Vec::new();
+        for path in all_temporary_little_date_file_paths() {
+            let f = File::create(path).unwrap();
+            let buf = BufWriter::with_capacity(BUF_SIZE, f);
+            writers.push(csv::Writer::from_writer(buf));
+        }
+        writers
+    };
+    let mut dates_to_ids_reader = csv::Reader::from_path(DATES_TO_IDS_INTERMEDIARY_CSV).unwrap();
+    dates_to_ids_reader
+        .deserialize()
+        .for_each(
+            |res| {
+                let record: DateEntry = res.unwrap();
+                let has_remainder = record.revision_id % approx_bucket_size != 0;
+                let bucket = {
+                    if has_remainder {
+                        let bucket = record.revision_id / approx_bucket_size;
+                        if bucket > N_REVISION_FILES {
+                            bucket - 1 // handle last remainders
+                        } else {
+                            bucket
+                        }
+                    } else {
+                        (record.revision_id / approx_bucket_size) + 1
+                    }
+                };
+                little_date_file_writers[bucket as usize].serialize(record).unwrap()
+            }
+        );
+    little_date_file_writers
+        .drain(..)
+        .for_each(
+            |mut writer| writer.flush().unwrap()
+        );
+
+    // convert the little date files into serialized binary tree maps
+    let mut b_tree_map_files: BTreeMap<Instant, String> = Default::default();
+    all_temporary_little_date_file_paths()
+        .for_each(
+            |path| {
+                let out_path = temporary_little_date_file_path_to_date_to_id_path(&path);
+                let mut reader = csv::Reader::from_path(path).unwrap();
+                let mut output_map: BTreeMap<Instant, Vec<RevisionID>> = Default::default();
+                reader
+                    .deserialize()
+                    .for_each(
+                        |res| {
+                            let record: DateEntry = res.unwrap();
+                            output_map
+                                .entry(record.instant)
+                                .or_insert_with(Vec::new)
+                                .push(record.revision_id);
+                        }
+                    );
+                let min_value = output_map.keys().next().unwrap();
+                let out_file = File::create(&out_path).unwrap();
+                let out_writer = BufWriter::with_capacity(BUF_SIZE, out_file);
+                serde_json::to_writer(out_writer, &output_map).unwrap();
+                b_tree_map_files.insert(*min_value, out_path);
+            }
+        );
+
+    // save super date index
+    let super_map_file = File::create(SUPER_DATE_BTREE_FILE).unwrap();
+    let out_writer = BufWriter::with_capacity(BUF_SIZE, super_map_file);
+    serde_json::to_writer(out_writer, &b_tree_map_files).unwrap();
+    log("date indices saved.");
 }
 
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
@@ -428,7 +664,7 @@ fn download_revisions(date: String) {
             "{}",
             cmp::max(
                 num_cpus::get(),
-                2
+                2,
             )
         );
         let (tx, rx) = bounded(1);
@@ -437,7 +673,7 @@ fn download_revisions(date: String) {
             move || {
                 log("starting downloader program...");
                 let status = Command::new("/src/download")
-                    .arg(WORKING_DIR)
+                    .arg(FAST_DIR)
                     .arg(&date)
                     .arg(&num_subprocesses)
                     .arg(PIPE_DIR)
@@ -473,25 +709,25 @@ fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Resul
     stream::iter(byte_result_iter)
 }
 
-#[get("{start}/{end}/diffs")]
+# [get("{start}/{end}/diffs")]
 async fn get_diffs_for_period(info: web::Path<(Instant, Instant)>) -> impl Responder {
     let stream = iter_to_byte_stream(
-        STATE.diffs_for_period(&info.0, &info.1)
+        STATE.diffs_for_period(info.0, info.1)
     );
     HttpResponse::Ok()
         .streaming(stream)
 }
 
-#[get("{start}/{end}/revisions")]
+# [get("{start}/{end}/revisions")]
 async fn get_revisions_for_period(info: web::Path<(Instant, Instant)>) -> impl Responder {
     let stream = iter_to_byte_stream(
-        STATE.revisions_from_period(&info.0, &info.1)
+        STATE.revisions_from_period(info.0, info.1)
     );
     HttpResponse::Ok()
         .streaming(stream)
 }
 
-#[actix_rt::main]
+# [actix_rt::main]
 async fn server(bind: String) -> std::io::Result<()> {
     HttpServer::new(|| {
         ActixApp::new()
@@ -506,7 +742,9 @@ async fn server(bind: String) -> std::io::Result<()> {
 }
 
 fn log(s: &str) {
-    println!("{}", s.magenta().on_blue());
+    let dt = Utc::now();
+    let message = (dt.format("%+").to_string() + " " + s).magenta().on_blue();
+    println!("{}", message);
 }
 
 fn main() {
@@ -515,18 +753,18 @@ fn main() {
         .author("Dominic <@DominicBurkart>")
         .about("Serves new & updated wikipedia articles (or fragments) within a set time period.")
         .arg(Arg::with_name("date")
-           .short("d")
-           .long("date")
-           .value_name("DATE")
-           .help("download revisions from the wikidump on this date. Format YYYYMMDD (e.g. 20201201). If not passed, local revisions are used.")
-           .takes_value(true))
+            .short("d")
+            .long("date")
+            .value_name("DATE")
+            .help("download revisions from the wikidump on this date. Format YYYYMMDD (e.g. 20201201). If not passed, local revisions are used.")
+            .takes_value(true))
         .arg(Arg::with_name("bind")
-           .short("b")
-           .long("bind")
-           .value_name("BIND")
-           .help("address and port to bind the server to. Example: 127.0.0.1:8088")
-           .takes_value(true))
-      .get_matches();
+            .short("b")
+            .long("bind")
+            .value_name("BIND")
+            .help("address and port to bind the server to. Example: 127.0.0.1:8088")
+            .takes_value(true))
+        .get_matches();
 
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
@@ -534,9 +772,6 @@ fn main() {
             date.to_string()
         );
     }
-
-    // instantiate global state object before the server
-    STATE.get_revision(1);
 
     // start server
     let bind = matches

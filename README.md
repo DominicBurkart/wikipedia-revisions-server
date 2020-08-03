@@ -11,7 +11,7 @@ docker build -t wikipedia-revisions-server .
 
 Run (specifying working & storage directories):
 ```shell
-docker run -v /Volumes/doggo:/working_dir -v /Volumes/burkart-6tb/wiki_revisions:/storage_dir wikipedia-revisions-server -d 20200601
+docker run -v /Volumes/doggo:/fast_dir -v /Volumes/biggo/wiki_revisions:/big_dir wikipedia-revisions-server -d 20200601
 ```
 
 If the revisions are already downloaded in the correct format, just mount their directory as storage_dir:
