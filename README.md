@@ -1,3 +1,5 @@
+[![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/Docker%20Image%20CI/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster)
+
 This project serves wikipedia revision differences from a given time 
 period, taking an http request with a start datetime and end datetime, 
 and sending the revisions via a brotli-compressed stream.
