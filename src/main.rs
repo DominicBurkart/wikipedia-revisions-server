@@ -24,7 +24,7 @@ use std::time::Duration;
 extern crate lazy_static;
 
 const BUF_SIZE: usize = 512 * 1024;
-const BROTLI_COMPRESSION_LEVEL: u32 = 8;
+const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
 const FAST_DIR: &str = "/fast_dir";
 const BIG_DIR: &str = "/big_dir";
 const PIPE_DIR: &str = "/pipes";
@@ -275,7 +275,7 @@ fn revision_to_bytes(record: &csv::StringRecord) -> Vec<u8> {
 
     let mut v = Vec::new();
     {
-        let mut writer = brotli2::write::BrotliEncoder::new(&mut v, BROTLI_COMPRESSION_LEVEL);
+        let mut writer = brotli2::write::BrotliEncoder::new(&mut v, BROTLI_DATA_COMPRESSION_LEVEL);
         writer.write_all(record_string.as_bytes()).unwrap();
     }
     v
@@ -402,29 +402,35 @@ fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
         )
 }
 
+fn ith_temporary_little_date_path(i: u64) -> String {
+    format!(
+        "{}/{}_temp_date_mapping.csv",
+        FAST_DIR,
+        i
+    )
+}
+
 fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
     (1..(N_REVISION_FILES + 1))
-        .map(
-            |i| format!(
-                "{}/{}_temp_date_mapping.csv",
-                FAST_DIR,
-                i
-            )
-        )
+        .map(ith_temporary_little_date_path)
+}
+
+fn ith_date_to_id_path(i: &str) -> String {
+    format!(
+        "{}/{}_date_map.json",
+        FAST_DIR,
+        i
+    )
 }
 
 fn temporary_little_date_file_path_to_date_to_id_path(little_file_path: &str) -> String {
     let bucket = BUCKET_FROM_LITTLE_MAP_PACK
         .captures(little_file_path)
         .unwrap()
-        .get(0)
+        .get(1)
         .unwrap()
         .as_str();
-    format!(
-        "{}/{}_date_map.json",
-        FAST_DIR,
-        bucket
-    )
+    ith_date_to_id_path(bucket)
 }
 
 fn get_largest_id() -> RevisionID {
@@ -781,3 +787,18 @@ fn main() {
     server(bind).unwrap();
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_temporary_little_date_file_path_to_date_to_id_path() {
+        for i in 0..(N_REVISION_FILES + 1) {
+            let lil_temp_path = ith_temporary_little_date_path(i);
+            let derived_date_to_id = temporary_little_date_file_path_to_date_to_id_path(&lil_temp_path);
+            let true_date_to_id = ith_date_to_id_path(&i.to_string());
+            assert_eq!(derived_date_to_id, true_date_to_id);
+        }
+    }
+}
