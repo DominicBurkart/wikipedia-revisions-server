@@ -1,0 +1,4 @@
+id,parent_id,page_title,contributor_id,contributor_name,contributor_ip,timestamp,text,comment,page_id,page_ns
+1,,nice,,,192.168.0.1,2017-03-19T04:23:23Z,hi,,1,1
+2,1,nice,1,person,,2017-03-19T04:24:23Z,hi hi,,1,1
+3,,also nice,2,another_person,,2017-03-19T04:25:23Z,,sometimes there are comments,2,2

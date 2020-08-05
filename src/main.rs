@@ -1,6 +1,6 @@
 use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
 use bytes::Bytes;
-use chrono::{DateTime, FixedOffset, Utc};
+use chrono::{DateTime, FixedOffset, Utc, TimeZone};
 use clap::{App, Arg};
 use colored::*;
 use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
@@ -19,6 +19,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+
 
 #[macro_use]
 extern crate lazy_static;
@@ -107,19 +108,32 @@ impl State {
         start: Instant,
         end: Instant,
     ) -> impl Iterator<Item=Vec<RevisionID>> + 'a {
+        println!("starting_date_per_index: {:?}\nstart: {}", self.starting_date_per_index, start);
         let prior_start = self
             .starting_date_per_index
-            .range(..start)
+            .range(..start) // todo performance improvement: make this inclusive
             .map(|(instant, _path)| instant)
             .next_back()
-            .unwrap();
+            .unwrap_or_else(
+                || self
+                    .starting_date_per_index
+                    .keys()
+                    .next()
+                    .unwrap()
+            );
 
         let final_end = self
             .starting_date_per_index
             .range(end..)
             .map(|(instant, _path)| instant)
             .next()
-            .unwrap();
+            .unwrap_or_else(
+                || self
+                    .starting_date_per_index
+                    .keys()
+                    .next_back()
+                    .unwrap()
+            );
 
         self
             .starting_date_per_index
@@ -309,19 +323,19 @@ fn revisions_csv_to_files<'a>(
             .map(
                 |record| {
                     // row content:
-                    //    [
-                    //        "id",
-                    //        "parent_id",
-                    //        "page_title",
-                    //        "contributor_id",
-                    //        "contributor_name",
-                    //        "contributor_ip",
-                    //        "timestamp",
-                    //        "text",
-                    //        "comment",
-                    //        "page_id",
-                    //        "page_ns",
-                    //    ]
+//                        [
+//                            "id",
+//                            "parent_id",
+//                            "page_title",
+//                            "contributor_id",
+//                            "contributor_name",
+//                            "contributor_ip",
+//                            "timestamp",
+//                            "text",
+//                            "comment",
+//                            "page_id",
+//                            "page_ns",
+//                        ]
 
                     // write record to file
                     let revision_id = RevisionID::from_str_radix(&record[0], 10).unwrap();
@@ -435,20 +449,14 @@ fn temporary_little_date_file_path_to_date_to_id_path(little_file_path: &str) ->
 
 fn get_largest_id() -> RevisionID {
     all_ids_to_positions_paths()
-        .map(
-            |path| {
-                let mut reader = csv::Reader::from_path(path).unwrap();
-                reader
-                    .deserialize()
-                    .map(
-                        |rec| {
-                            let position_entry: PositionEntry = rec.unwrap();
-                            position_entry.revision_id
-                        }
-                    )
-                    .max()
+        .filter_map(
+            |path|
+                csv::Reader::from_path(path)
                     .unwrap()
-            }
+                    .into_deserialize()
+                    .filter_map(|res| res.ok())
+                    .map(|position_entry: PositionEntry| position_entry.revision_id)
+                    .max()
         )
         .max()
         .unwrap()
@@ -589,7 +597,7 @@ fn process_input_pipes(
     // *assuming that ids increase monotonically over time,*
     // we can use the largest ID to split the ids by date.
     let largest_id = get_largest_id();
-    let approx_bucket_size = largest_id / N_REVISION_FILES;
+    let approx_bucket_size = std::cmp::max(largest_id / N_REVISION_FILES, 1);
 
     // split the big date file into little date files
     let mut little_date_file_writers = {
@@ -635,10 +643,10 @@ fn process_input_pipes(
         .for_each(
             |path| {
                 let out_path = temporary_little_date_file_path_to_date_to_id_path(&path);
-                let mut reader = csv::Reader::from_path(path).unwrap();
                 let mut output_map: BTreeMap<Instant, Vec<RevisionID>> = Default::default();
-                reader
-                    .deserialize()
+                csv::Reader::from_path(path)
+                    .unwrap()
+                    .into_deserialize()
                     .for_each(
                         |res| {
                             let record: DateEntry = res.unwrap();
@@ -648,11 +656,14 @@ fn process_input_pipes(
                                 .push(record.revision_id);
                         }
                     );
-                let min_value = output_map.keys().next().unwrap();
-                let out_file = File::create(&out_path).unwrap();
-                let out_writer = BufWriter::with_capacity(BUF_SIZE, out_file);
-                serde_json::to_writer(out_writer, &output_map).unwrap();
-                b_tree_map_files.insert(*min_value, out_path);
+                if let Some(min_value) = output_map.keys().next() {
+                    let out_file = File::create(&out_path).unwrap();
+                    let out_writer = BufWriter::with_capacity(BUF_SIZE, out_file);
+                    serde_json::to_writer(out_writer, &output_map).unwrap();
+                    b_tree_map_files.insert(*min_value, out_path);
+                } else {
+                    // empty file. are we testing with a small # of revisions?
+                }
             }
         );
 
@@ -715,19 +726,31 @@ fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Resul
     stream::iter(byte_result_iter)
 }
 
-# [get("{start}/{end}/diffs")]
-async fn get_diffs_for_period(info: web::Path<(Instant, Instant)>) -> impl Responder {
+# [get("/{start}/{end}/diffs")]
+async fn get_diffs_for_period(info: web::Path<(i64,  i64)>) -> impl Responder {
+    println!("diffs requested");
+    let start = FixedOffset::east(0).timestamp(info.0, 0); // arbitrary offset
+    let end =  FixedOffset::east(0).timestamp(info.1, 0);
     let stream = iter_to_byte_stream(
-        STATE.diffs_for_period(info.0, info.1)
+        STATE.diffs_for_period(
+            start,
+            end
+        )
     );
     HttpResponse::Ok()
         .streaming(stream)
 }
 
-# [get("{start}/{end}/revisions")]
-async fn get_revisions_for_period(info: web::Path<(Instant, Instant)>) -> impl Responder {
+# [get("/{start}/{end}/revisions")]
+async fn get_revisions_for_period(info: web::Path<(i64, i64)>) -> impl Responder {
+    println!("revs requested");
+    let start = FixedOffset::east(0).timestamp(info.0, 0); // arbitrary offset
+    let end = FixedOffset::east(0).timestamp(info.1, 0);
     let stream = iter_to_byte_stream(
-        STATE.revisions_from_period(info.0, info.1)
+        STATE.revisions_from_period(
+            start,
+            end
+        )
     );
     HttpResponse::Ok()
         .streaming(stream)
@@ -735,12 +758,12 @@ async fn get_revisions_for_period(info: web::Path<(Instant, Instant)>) -> impl R
 
 # [actix_rt::main]
 async fn server(bind: String) -> std::io::Result<()> {
-    HttpServer::new(|| {
-        ActixApp::new()
+    HttpServer::new(
+        || ActixApp::new()
             .wrap(middleware::Compress::default())
             .service(get_diffs_for_period)
             .service(get_revisions_for_period)
-    })
+    )
         .keep_alive(45)
         .bind(&bind)?
         .run()
@@ -791,6 +814,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use actix_web::{test as actix_test};
+    use std::fs;
 
     #[test]
     fn test_temporary_little_date_file_path_to_date_to_id_path() {
@@ -801,4 +826,48 @@ mod tests {
             assert_eq!(derived_date_to_id, true_date_to_id);
         }
     }
+
+    #[actix_rt::test]
+    async fn integration_test() {
+        // copy test data
+        let fake_pipe_path = format!("{}/{}", PIPE_DIR, "revisions-0-0.pipe");
+        fs::copy("test_data/sample.csv", &fake_pipe_path).unwrap();
+
+        // process data
+        let (tx, rx) = bounded(1);
+        tx.send(true).unwrap();
+        process_input_pipes(rx);
+
+        // run server
+        let mut app = actix_test::init_service(
+            ActixApp::new()
+                .wrap(middleware::Compress::default())
+                .service(get_diffs_for_period)
+                .service(get_revisions_for_period)
+        ).await;
+
+        // return all test revisions
+        let inclusive_uri = format!(
+            "/{}/{}/revisions",
+            DateTime::parse_from_rfc3339("2017-03-18T04:23:23Z").unwrap().timestamp(),
+            DateTime::parse_from_rfc3339("2017-03-20T04:23:23Z").unwrap().timestamp()
+        );
+        let req = actix_test::TestRequest::with_uri(&inclusive_uri).to_request(); // todo specialize this
+        let mut resp = actix_test::call_service(&mut app, req).await;
+        assert!(resp.status().is_success());
+        // todo test content https://actix.rs/docs/testing/
+
+        // only return some
+        let uninclusive_uri = format!(
+            "/{}/{}/revisions",
+            DateTime::parse_from_rfc3339("2017-03-19T04:23:23Z").unwrap().timestamp(),
+            DateTime::parse_from_rfc3339("2017-03-19T04:24:23Z").unwrap().timestamp()
+        );
+        let req = actix_test::TestRequest::with_uri(&uninclusive_uri).to_request(); // todo specialize this
+        let mut resp = actix_test::call_service(&mut app, req).await;
+        assert!(resp.status().is_success());
+        // todo test content
+    }
+
+    // todo ideally we would have a metric for max concurrent threads, as constrained by memory
 }

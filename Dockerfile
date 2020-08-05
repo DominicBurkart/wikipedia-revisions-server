@@ -12,10 +12,15 @@ ADD Cargo.toml .
 RUN /root/.cargo/bin/cargo fetch
 
 RUN mkdir /pipes
+RUN mkdir /big_dir
+RUN mkdir /fast_dir
+
+ADD test_data/* test_data/
 
 # add code & compile
 ADD src/* src/
 RUN chmod +x /src/download
+RUN /root/.cargo/bin/cargo test
 RUN /root/.cargo/bin/cargo build --release
 ENV TERM xterm-256color
 ENV RUST_BACKTRACE=1
