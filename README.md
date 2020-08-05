@@ -1,3 +1,11 @@
+```
+  _      ___ __    _   ___           _     _                 ____                    
+ | | /| / (_) /__ (_) / _ \___ _  __(_)__ (_)__  ___  ___   / __/__ _____  _____ ____
+ | |/ |/ / /  '_// / / , _/ -_) |/ / (_-</ / _ \/ _ \(_-<  _\ \/ -_) __/ |/ / -_) __/
+ |__/|__/_/_/\_\/_/ /_/|_|\__/|___/_/___/_/\___/_//_/___/ /___/\__/_/  |___/\__/_/   
+```                                                                                    
+
+
 [![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/Docker%20Image%20CI/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster)
 
 This project serves wikipedia revision differences from a given time 
