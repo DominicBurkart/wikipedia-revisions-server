@@ -6,7 +6,7 @@
 ```                                                                                    
 
 
-[![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/Docker%20Image%20CI/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster)
+[![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/Docker%20Image%20CI/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster+workflow%3A"Docker+Image+CI") [![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/rust%20linters/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster+workflow%3A"rust+linters")
 
 This project serves wikipedia revision differences from a given time 
 period, taking an http request with a start datetime and end datetime, 
