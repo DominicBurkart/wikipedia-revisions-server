@@ -10,7 +10,8 @@
 
 This project serves wikipedia revision differences from a given time 
 period, taking an http request with a start datetime and end datetime, 
-and sending the revisions via a brotli-compressed stream.
+and sending the revisions via a brotli-compressed stream. In the response
+stream, each line is a JSON-encoded revision. 
 
 Build the project:
 ```shell
