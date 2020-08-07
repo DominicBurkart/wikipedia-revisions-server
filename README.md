@@ -13,6 +13,8 @@ period, taking an http request with a start datetime and end datetime,
 and sending the revisions via a brotli-compressed stream. In the response
 stream, each line is a JSON-encoded revision. 
 
+documentation coming soon 🥧⏲️
+
 Build the project:
 ```shell
 docker build -t wikipedia-revisions-server .
