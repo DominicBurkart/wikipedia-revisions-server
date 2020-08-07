@@ -1,6 +1,17 @@
+```
+  _      ___ __    _   ___           _     _                 ____                    
+ | | /| / (_) /__ (_) / _ \___ _  __(_)__ (_)__  ___  ___   / __/__ _____  _____ ____
+ | |/ |/ / /  '_// / / , _/ -_) |/ / (_-</ / _ \/ _ \(_-<  _\ \/ -_) __/ |/ / -_) __/
+ |__/|__/_/_/\_\/_/ /_/|_|\__/|___/_/___/_/\___/_//_/___/ /___/\__/_/  |___/\__/_/   
+```                                                                                    
+
+
+[![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/Docker%20Image%20CI/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster+workflow%3A"Docker+Image+CI") [![status](https://github.com/DominicBurkart/wikipedia-revisions-server/workflows/rust%20linters/badge.svg)](https://github.com/DominicBurkart/wikipedia-revisions-server/actions?query=is%3Acompleted+branch%3Amaster+workflow%3A"rust+linters")
+
 This project serves wikipedia revision differences from a given time 
 period, taking an http request with a start datetime and end datetime, 
-and sending the revisions via a brotli-compressed stream.
+and sending the revisions via a brotli-compressed stream. In the response
+stream, each line is a JSON-encoded revision. 
 
 Build the project:
 ```shell
