@@ -25,6 +25,7 @@ extern crate lazy_static;
 
 const BUF_SIZE: usize = 512 * 1024;
 const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
+const BROTLI_INDEX_COMPRESSION_LEVEL: u32 = 3;
 const FAST_DIR: &str = "/fast_dir";
 const BIG_DIR: &str = "/big_dir";
 const PIPE_DIR: &str = "/pipes";
@@ -143,7 +144,8 @@ impl State {
                     let time_indices: BTreeMap<Instant, Vec<RevisionID>> = {
                         let f = File::open(path).unwrap();
                         let buf = BufReader::with_capacity(BUF_SIZE, f);
-                        serde_json::from_reader(buf).unwrap()
+                        let compressor = brotli2::read::BrotliDecoder::new(buf);
+                        serde_json::from_reader(compressor).unwrap()
                     };
                     time_indices
                         .range(start..end)
@@ -525,30 +527,35 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
         for path in all_temporary_little_date_file_paths() {
             let f = File::create(path).unwrap();
             let buf = BufWriter::with_capacity(BUF_SIZE, f);
-            writers.push(csv::Writer::from_writer(buf));
+            let compressor = brotli2::write::BrotliEncoder::new(buf, BROTLI_INDEX_COMPRESSION_LEVEL);
+            writers.push(csv::Writer::from_writer(compressor));
         }
         writers
     };
     let mut dates_to_ids_reader = csv::Reader::from_path(DATES_TO_IDS_INTERMEDIARY_CSV).unwrap();
-    dates_to_ids_reader.deserialize().for_each(|res| {
-        let record: DateEntry = res.unwrap();
-        let has_remainder = record.revision_id % approx_bucket_size != 0;
-        let bucket = {
-            if has_remainder {
-                let bucket = record.revision_id / approx_bucket_size;
-                if bucket > N_REVISION_FILES {
-                    bucket - 1 // handle last remainders
-                } else {
-                    bucket
-                }
-            } else {
-                (record.revision_id / approx_bucket_size) + 1
+    dates_to_ids_reader
+        .deserialize()
+        .for_each(
+            |res| {
+                let record: DateEntry = res.unwrap();
+                let has_remainder = record.revision_id % approx_bucket_size != 0;
+                let bucket = {
+                    if has_remainder {
+                        let bucket = record.revision_id / approx_bucket_size;
+                        if bucket > N_REVISION_FILES {
+                            bucket - 1 // handle last remainders
+                        } else {
+                            bucket
+                        }
+                    } else {
+                        (record.revision_id / approx_bucket_size) + 1
+                    }
+                };
+                little_date_file_writers[bucket as usize]
+                    .serialize(record)
+                    .unwrap()
             }
-        };
-        little_date_file_writers[bucket as usize]
-            .serialize(record)
-            .unwrap()
-    });
+        );
     little_date_file_writers
         .drain(..)
         .for_each(|mut writer| writer.flush().unwrap());
@@ -560,8 +567,10 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
             |path| {
                 let out_path = temporary_little_date_file_path_to_date_to_id_path(&path);
                 let mut output_map: BTreeMap<Instant, Vec<RevisionID>> = Default::default();
-                csv::Reader::from_path(path.clone())
-                    .unwrap()
+                let in_file = File::open(&path).unwrap();
+                let in_buf = BufReader::with_capacity(BUF_SIZE, in_file);
+                let decompressor = brotli2::read::BrotliDecoder::new(in_buf);
+                csv::Reader::from_reader(decompressor)
                     .into_deserialize()
                     .for_each(
                         |res| {
@@ -574,8 +583,9 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
                     );
                 if let Some(min_value) = output_map.keys().next() {
                     let out_file = File::create(&out_path).unwrap();
-                    let out_writer = BufWriter::with_capacity(BUF_SIZE, out_file);
-                    serde_json::to_writer(out_writer, &output_map).unwrap();
+                    let out_buf = BufWriter::with_capacity(BUF_SIZE, out_file);
+                    let out_compressor = brotli2::write::BrotliEncoder::new(out_buf, BROTLI_INDEX_COMPRESSION_LEVEL);
+                    serde_json::to_writer(out_compressor, &output_map).unwrap();
                     b_tree_map_files.insert(*min_value, out_path);
                 } else {
                     warning(
