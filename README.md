@@ -22,12 +22,12 @@ docker build -t wikipedia-revisions-server .
 
 Run (specifying working & storage directories, plus dump date):
 ```shell
-docker run -it -v /Volumes/doggo:/fast_dir -v /Volumes/biggo/wiki_revisions:/big_dir wikipedia-revisions-server -d 20200601
+docker run -it -v /local/path:/fast_dir -v /other/local/path:/big_dir wikipedia-revisions-server -d 20200601
 ```
 
 If the data and index files have already been built, you can start the server without having to rebuild:
 ```shell
-docker run -it -v /Volumes/doggo:/fast_dir -v /Volumes/biggo/wiki_revisions:/big_dir wikipedia-revisions-server
+docker run -it -v /local/path:/fast_dir -v /other/local/path:/big_dir wikipedia-revisions-server
 ```
 
 To find a valid date (-d param), go to the [wiki archives](https://dumps.wikimedia.org/enwiki/) and find a date with available .xml.bz2 files to download for "All pages with complete page edit history"
