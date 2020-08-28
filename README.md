@@ -33,3 +33,5 @@ docker run -it -v /local/path:/fast_dir -v /other/local/path:/big_dir wikipedia-
 To find a valid date (-d param), go to the [wiki archives](https://dumps.wikimedia.org/enwiki/) and find a date with available .xml.bz2 files to download for "All pages with complete page edit history"
 
 See the python [wikipedia revisions](https://github.com/dominicburkart/wikipedia-revisions) repo for different download targets & schemes than those available here.
+
+Thanks to [JetBrains](https://www.jetbrains.com/?from=WikipediaRevisionsServer) for providing an open source license to their IDEs for developing this project!
