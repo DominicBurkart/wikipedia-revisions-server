@@ -492,10 +492,7 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
 
             select.ready_timeout(Duration::from_secs(60)).ok();
 
-            pending_receivers.retain(|_, receiver| match receiver.try_recv() {
-                Ok(_) => false,
-                _ => true,
-            });
+            pending_receivers.retain(|_, receiver| !matches!(receiver.try_recv(), Ok(_)));
         }
     }
 
