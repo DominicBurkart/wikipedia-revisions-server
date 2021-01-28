@@ -114,11 +114,11 @@ impl State {
         Err(RetrievalError {}.into())
     }
 
-    fn revision_ids_from_period<'a>(
-        &'a self,
+    fn revision_ids_from_period(
+        &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<RevisionID>> + 'a {
+    ) -> impl Iterator<Item=Vec<RevisionID>> + '_ {
 
         // the prior start and trailing end are the
         // edges of the window of the trees that
@@ -158,21 +158,21 @@ impl State {
             )
     }
 
-    fn revisions_from_period<'a>(
-        &'a self,
+    fn revisions_from_period(
+        &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Revision> + 'a {
+    ) -> impl Iterator<Item=Revision> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_revision(id))
     }
 
-    fn diffs_for_period<'a>(
-        &'a self,
+    fn diffs_for_period(
+        &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + 'a {
+    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -297,7 +297,7 @@ fn revisions_csv_to_files(
     input_path: &str,
     dates_to_ids: Arc<Mutex<csv::Writer<BufWriter<File>>>>,
     ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
-    writer_locks: Arc<Vec<Mutex<WriteCounter>>>,
+    writer_locks: Arc<[Mutex<WriteCounter>]>
 ) {
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
@@ -422,17 +422,17 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
     let mut one_found = false;
     let mut processor_threads = Vec::new();
     let writer_locks = {
-        let mut inner_locks = Vec::new();
-        all_revisions_files().for_each(|path| {
+        let writer_locks: Vec<Mutex<WriteCounter>> = all_revisions_files().map(|path| {
             let f = File::create(path).unwrap();
             let buf = BufWriter::with_capacity(BUF_SIZE, f);
             let writer_counter = WriteCounter {
                 writer: buf,
                 size: 0,
             };
-            inner_locks.push(Mutex::new(writer_counter));
-        });
-        Arc::new(inner_locks)
+            Mutex::new(writer_counter)
+        })
+        .collect();
+        Arc::from(writer_locks)
     };
     let ids_to_positions = {
         let mut csv_writers = Vec::new();
