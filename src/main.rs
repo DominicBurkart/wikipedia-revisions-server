@@ -1,4 +1,20 @@
-use actix_web::{get, middleware, web, App as ActixApp, HttpResponse, HttpServer, Responder};
+#[macro_use]
+extern crate lazy_static;
+
+use std::cmp;
+use std::collections::{BTreeMap, HashMap};
+use std::convert::TryFrom;
+use std::default::Default;
+use std::error::Error;
+use std::fs::{File, read_dir, remove_file};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Bound::{Included, Unbounded};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use clap::{App, Arg};
@@ -7,21 +23,6 @@ use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
 use futures::stream::{self, Stream};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::cmp;
-use std::collections::{BTreeMap, HashMap};
-use std::convert::TryFrom;
-use std::default::Default;
-use std::error::Error;
-use std::fs::{read_dir, remove_file, File};
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-use std::ops::Bound::{Included, Unbounded};
-
-#[macro_use]
-extern crate lazy_static;
 
 const BUF_SIZE: usize = 512 * 1024;
 const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
@@ -32,7 +33,7 @@ const PIPE_DIR: &str = "/pipes";
 const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
 const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
-                                   // ^ must be less than max usize.
+// ^ must be less than max usize.
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -117,7 +118,7 @@ impl State {
         &'a self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Vec<RevisionID>> + 'a {
+    ) -> impl Iterator<Item=Vec<RevisionID>> + 'a {
 
         // the prior start and trailing end are the
         // edges of the window of the trees that
@@ -161,7 +162,7 @@ impl State {
         &'a self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Revision> + 'a {
+    ) -> impl Iterator<Item=Revision> + 'a {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_revision(id))
@@ -171,7 +172,7 @@ impl State {
         &'a self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Vec<NewRevisionFragment>> + 'a {
+    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + 'a {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -368,11 +369,11 @@ fn revisions_csv_to_files<'a>(
     log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
 
-fn all_revisions_files() -> impl Iterator<Item = String> {
+fn all_revisions_files() -> impl Iterator<Item=String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}", BIG_DIR, i))
 }
 
-fn all_ids_to_positions_paths() -> impl Iterator<Item = String> {
+fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}_maps.csv", FAST_DIR, i))
 }
 
@@ -380,7 +381,7 @@ fn ith_temporary_little_date_path(i: u64) -> String {
     format!("{}/{}_temp_date_mapping.csv", FAST_DIR, i)
 }
 
-fn all_temporary_little_date_file_paths() -> impl Iterator<Item = String> {
+fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
     (1..(N_REVISION_FILES + 1)).map(ith_temporary_little_date_path)
 }
 
@@ -609,7 +610,7 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
 /// Wraps https://github.com/dominicburkart/wikipedia-revisions
 fn download_revisions(date: String) {
     let downloader_receiver = {
-        let num_subprocesses = format!("{}", cmp::max(num_cpus::get(), 2,));
+        let num_subprocesses = format!("{}", cmp::max(num_cpus::get(), 2));
         let (tx, rx) = bounded(1);
 
         thread::spawn(move || {
@@ -635,10 +636,10 @@ fn download_revisions(date: String) {
     process_input_pipes(downloader_receiver);
 }
 
-fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item = serde_json::Result<bytes::Bytes>>
-where
-    It: Iterator<Item = T1>,
-    T1: Serialize + Deserialize<'a>,
+fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Result<bytes::Bytes>>
+    where
+        It: Iterator<Item=T1>,
+        T1: Serialize + Deserialize<'a>,
 {
     let byte_result_iter = it.map(
         |obj|
@@ -677,10 +678,10 @@ async fn server(bind: String) -> std::io::Result<()> {
             .service(get_diffs_for_period)
             .service(get_revisions_for_period)
     })
-    .keep_alive(45)
-    .bind(&bind)?
-    .run()
-    .await
+        .keep_alive(45)
+        .bind(&bind)?
+        .run()
+        .await
 }
 
 fn log(s: &str) {
@@ -726,10 +727,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use actix_web::test as actix_test;
     use std::fs;
+
+    use actix_web::test as actix_test;
     use futures_util::stream::TryStreamExt;
+
+    use super::*;
 
     #[test]
     fn test_temporary_little_date_file_path_to_date_to_id_path() {
@@ -761,7 +764,7 @@ mod tests {
                     .service(get_diffs_for_period)
                     .service(get_revisions_for_period),
             )
-            .await
+                .await
         };
 
         // return all test revisions
@@ -788,91 +791,104 @@ mod tests {
                     |line| serde_json::from_str(line).unwrap()
                 )
                 .collect();
+        let first_revision = Revision {
+            id: 1,
+            parent_id: None,
+            page_title: "nice".to_string(),
+            contributor_id: None,
+            contributor_name: None,
+            contributor_ip: Some("192.168.0.1".to_string()),
+            timestamp: "2017-03-19T04:23:23Z".to_string(),
+            text: Some("hi".to_string()),
+            comment: None,
+            page_id: 1,
+            page_ns: 1,
+        };
+        let middle_revision = Revision {
+            id: 2,
+            parent_id: Some(1),
+            page_title: "nice".to_string(),
+            contributor_id: Some(1),
+            contributor_name: Some("person".to_string()),
+            contributor_ip: None,
+            timestamp: "2017-03-19T04:24:23Z".to_string(),
+            text: Some("hi\nhi".to_string()),
+            comment: None,
+            page_id: 1,
+            page_ns: 1,
+        };
+        let final_revision = Revision {
+            id: 3,
+            parent_id: None,
+            page_title: "also nice".to_string(),
+            contributor_id: Some(2),
+            contributor_name: Some("another_person".to_string()),
+            contributor_ip: None,
+            timestamp: "2017-03-19T04:25:23Z".to_string(),
+            text: None,
+            comment: Some("sometimes there are comments".to_string()),
+            page_id: 2,
+            page_ns: 2,
+        };
         assert_eq!(
             revisions,
-            vec![
-                Revision {
-                    id: 1,
-                    parent_id: None,
-                    page_title: "nice".to_string(),
-                    contributor_id: None,
-                    contributor_name: None,
-                    contributor_ip: Some("192.168.0.1".to_string()),
-                    timestamp: "2017-03-19T04:23:23Z".to_string(),
-                    text: Some("hi".to_string()),
-                    comment: None,
-                    page_id: 1,
-                    page_ns: 1,
-                },
-                Revision {
-                    id: 2,
-                    parent_id: Some(1),
-                    page_title: "nice".to_string(),
-                    contributor_id: Some(1),
-                    contributor_name: Some("person".to_string()),
-                    contributor_ip: None,
-                    timestamp: "2017-03-19T04:24:23Z".to_string(),
-                    text: Some("hi\nhi".to_string()),
-                    comment: None,
-                    page_id: 1,
-                    page_ns: 1,
-                },
-                Revision {
-                    id: 3,
-                    parent_id: None,
-                    page_title: "also nice".to_string(),
-                    contributor_id: Some(2),
-                    contributor_name: Some("another_person".to_string()),
-                    contributor_ip: None,
-                    timestamp: "2017-03-19T04:25:23Z".to_string(),
-                    text: None,
-                    comment: Some("sometimes there are comments".to_string()),
-                    page_id: 2,
-                    page_ns: 2,
-                },
-            ]
+            vec![first_revision, middle_revision, final_revision]
         );
 
-       // return some revisions
-       let exclusive_uri = format!(
-           "/{}/{}/revisions",
-           DateTime::parse_from_rfc3339("2017-03-19T04:24:21Z")
-               .unwrap()
-               .timestamp(),
-           DateTime::parse_from_rfc3339("2017-03-19T04:24:30Z")
-               .unwrap()
-               .timestamp()
-       );
-       let req = actix_test::TestRequest::with_uri(&exclusive_uri).to_request();
-       let mut resp = actix_test::call_service(&mut app, req).await;
-       assert!(resp.status().is_success());
-       let bytes = actix_test::load_stream(resp.take_body().into_stream())
-           .await
-           .unwrap();
-       let response_str = std::str::from_utf8(&bytes).unwrap();
-       let revisions: Vec<Revision> = response_str
-           .lines()
-           .map(
-               |line| serde_json::from_str(line).unwrap()
-           )
-           .collect();
-       assert_eq!(
-           revisions,
-           vec![
-               Revision {
-                    id: 2,
-                    parent_id: Some(1),
-                    page_title: "nice".to_string(),
-                    contributor_id: Some(1),
-                    contributor_name: Some("person".to_string()),
-                    contributor_ip: None,
-                    timestamp: "2017-03-19T04:24:23Z".to_string(),
-                    text: Some("hi\nhi".to_string()),
-                    comment: None,
-                    page_id: 1,
-                    page_ns: 1,
-                }
-           ]
-       );
+        // return some revisions
+        let exclusive_uri = format!(
+            "/{}/{}/revisions",
+            DateTime::parse_from_rfc3339("2017-03-19T04:24:21Z")
+                .unwrap()
+                .timestamp(),
+            DateTime::parse_from_rfc3339("2017-03-19T04:24:30Z")
+                .unwrap()
+                .timestamp()
+        );
+        let req = actix_test::TestRequest::with_uri(&exclusive_uri).to_request();
+        let mut resp = actix_test::call_service(&mut app, req).await;
+        assert!(resp.status().is_success());
+        let bytes = actix_test::load_stream(resp.take_body().into_stream())
+            .await
+            .unwrap();
+        let response_str = std::str::from_utf8(&bytes).unwrap();
+        let revisions: Vec<Revision> = response_str
+            .lines()
+            .map(
+                |line| serde_json::from_str(line).unwrap()
+            )
+            .collect();
+        assert_eq!(
+            revisions,
+            vec![middle_revision]
+        );
+
+        // queries are left-inclusive to passed values, but not right-inclusive
+        let exclusive_uri = format!(
+            "/{}/{}/revisions",
+            DateTime::parse_from_rfc3339("2017-03-19T04:24:23Z")
+                .unwrap()
+                .timestamp(),
+            DateTime::parse_from_rfc3339("2017-03-19T04:25:23Z")
+                .unwrap()
+                .timestamp()
+        );
+        let req = actix_test::TestRequest::with_uri(&exclusive_uri).to_request();
+        let mut resp = actix_test::call_service(&mut app, req).await;
+        assert!(resp.status().is_success());
+        let bytes = actix_test::load_stream(resp.take_body().into_stream())
+            .await
+            .unwrap();
+        let response_str = std::str::from_utf8(&bytes).unwrap();
+        let revisions: Vec<Revision> = response_str
+            .lines()
+            .map(
+                |line| serde_json::from_str(line).unwrap()
+            )
+            .collect();
+        assert_eq!(
+            revisions,
+            vec![middle_revision]
+        );
     }
 }
