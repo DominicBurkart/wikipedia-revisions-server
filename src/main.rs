@@ -250,7 +250,7 @@ struct WriteCounter {
 }
 
 impl WriteCounter {
-    fn write_all<'a>(&mut self, bytes: &'a [u8]) -> std::io::Result<()> {
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.writer.write_all(bytes)?;
         self.size += bytes.len() as u64;
         Ok(())
@@ -293,8 +293,8 @@ fn write_compressed_revision(
     (record_start, record_length)
 }
 
-fn revisions_csv_to_files<'a>(
-    input_path: &'a str,
+fn revisions_csv_to_files(
+    input_path: &str,
     dates_to_ids: Arc<Mutex<csv::Writer<BufWriter<File>>>>,
     ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
     writer_locks: Arc<Vec<Mutex<WriteCounter>>>,
