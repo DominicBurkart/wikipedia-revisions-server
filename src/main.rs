@@ -833,46 +833,46 @@ mod tests {
             ]
         );
 
-//        // return some revisions
-//        let exclusive_uri = format!(
-//            "/{}/{}/revisions",
-//            DateTime::parse_from_rfc3339("2017-03-18T04:23:23Z")
-//                .unwrap()
-//                .timestamp(),
-//            DateTime::parse_from_rfc3339("2017-03-19T04:23:23Z")
-//                .unwrap()
-//                .timestamp()
-//        );
-//        let req = actix_test::TestRequest::with_uri(&exclusive_uri).to_request();
-//        let mut resp = actix_test::call_service(&mut app, req).await;
-//        assert!(resp.status().is_success());
-//        let bytes = actix_test::load_stream(resp.take_body().into_stream())
-//            .await
-//            .unwrap();
-//        let response_str = std::str::from_utf8(&bytes).unwrap();
-//        let revisions: Vec<Revision> = response_str
-//            .lines()
-//            .map(
-//                |line| serde_json::from_str(line).unwrap()
-//            )
-//            .collect();
-//        assert_eq!(
-//            revisions,
-//            vec![
-//                Revision {
-//                    id: 1,
-//                    parent_id: None,
-//                    page_title: "nice".to_string(),
-//                    contributor_id: None,
-//                    contributor_name: None,
-//                    contributor_ip: Some("192.168.0.1".to_string()),
-//                    timestamp: "2017-03-19T04:23:23Z".to_string(),
-//                    text: Some("hi".to_string()),
-//                    comment: None,
-//                    page_id: 1,
-//                    page_ns: 1,
-//                }
-//            ]
-//        );
+       // return some revisions
+       let exclusive_uri = format!(
+           "/{}/{}/revisions",
+           DateTime::parse_from_rfc3339("2017-03-19T04:24:21Z")
+               .unwrap()
+               .timestamp(),
+           DateTime::parse_from_rfc3339("2017-03-19T04:24:30Z")
+               .unwrap()
+               .timestamp()
+       );
+       let req = actix_test::TestRequest::with_uri(&exclusive_uri).to_request();
+       let mut resp = actix_test::call_service(&mut app, req).await;
+       assert!(resp.status().is_success());
+       let bytes = actix_test::load_stream(resp.take_body().into_stream())
+           .await
+           .unwrap();
+       let response_str = std::str::from_utf8(&bytes).unwrap();
+       let revisions: Vec<Revision> = response_str
+           .lines()
+           .map(
+               |line| serde_json::from_str(line).unwrap()
+           )
+           .collect();
+       assert_eq!(
+           revisions,
+           vec![
+               Revision {
+                    id: 2,
+                    parent_id: Some(1),
+                    page_title: "nice".to_string(),
+                    contributor_id: Some(1),
+                    contributor_name: Some("person".to_string()),
+                    contributor_ip: None,
+                    timestamp: "2017-03-19T04:24:23Z".to_string(),
+                    text: Some("hi\nhi".to_string()),
+                    comment: None,
+                    page_id: 1,
+                    page_ns: 1,
+                }
+           ]
+       );
     }
 }
