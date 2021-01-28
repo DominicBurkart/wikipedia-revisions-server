@@ -119,7 +119,6 @@ impl State {
         start: Instant,
         end: Instant,
     ) -> impl Iterator<Item=Vec<RevisionID>> + '_ {
-
         // the prior start and trailing end are the
         // edges of the window of the trees that
         // contain the revisions from from start to end.
@@ -139,23 +138,24 @@ impl State {
             .unwrap_or(&end); // end is out of known range
 
         self.starting_date_per_index
-            .range((Included(included_window_start), Included(included_window_end)))
-            .map(
-                move |(_date, path)| {
-                    let time_indices: BTreeMap<Instant, Vec<RevisionID>> = {
-                        let f = File::open(path).unwrap();
-                        let buf = BufReader::with_capacity(BUF_SIZE, f);
-                        let compressor = brotli2::read::BrotliDecoder::new(buf);
-                        serde_json::from_reader(compressor).unwrap()
-                    };
-                    time_indices
-                        .range(start..end)
-                        .map(|(_date, ids)| ids)
-                        .flatten()
-                        .copied()
-                        .collect()
-                }
-            )
+            .range((
+                Included(included_window_start),
+                Included(included_window_end),
+            ))
+            .map(move |(_date, path)| {
+                let time_indices: BTreeMap<Instant, Vec<RevisionID>> = {
+                    let f = File::open(path).unwrap();
+                    let buf = BufReader::with_capacity(BUF_SIZE, f);
+                    let compressor = brotli2::read::BrotliDecoder::new(buf);
+                    serde_json::from_reader(compressor).unwrap()
+                };
+                time_indices
+                    .range(start..end)
+                    .map(|(_date, ids)| ids)
+                    .flatten()
+                    .copied()
+                    .collect()
+            })
     }
 
     fn revisions_from_period(
@@ -297,7 +297,7 @@ fn revisions_csv_to_files(
     input_path: &str,
     dates_to_ids: Arc<Mutex<csv::Writer<BufWriter<File>>>>,
     ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
-    writer_locks: Arc<[Mutex<WriteCounter>]>
+    writer_locks: Arc<[Mutex<WriteCounter>]>,
 ) {
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
@@ -422,16 +422,17 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
     let mut one_found = false;
     let mut processor_threads = Vec::new();
     let writer_locks = {
-        let writer_locks: Vec<Mutex<WriteCounter>> = all_revisions_files().map(|path| {
-            let f = File::create(path).unwrap();
-            let buf = BufWriter::with_capacity(BUF_SIZE, f);
-            let writer_counter = WriteCounter {
-                writer: buf,
-                size: 0,
-            };
-            Mutex::new(writer_counter)
-        })
-        .collect();
+        let writer_locks: Vec<Mutex<WriteCounter>> = all_revisions_files()
+            .map(|path| {
+                let f = File::create(path).unwrap();
+                let buf = BufWriter::with_capacity(BUF_SIZE, f);
+                let writer_counter = WriteCounter {
+                    writer: buf,
+                    size: 0,
+                };
+                Mutex::new(writer_counter)
+            })
+            .collect();
         Arc::from(writer_locks)
     };
     let ids_to_positions = {
@@ -525,35 +526,32 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
         for path in all_temporary_little_date_file_paths() {
             let f = File::create(path).unwrap();
             let buf = BufWriter::with_capacity(BUF_SIZE, f);
-            let compressor = brotli2::write::BrotliEncoder::new(buf, BROTLI_INDEX_COMPRESSION_LEVEL);
+            let compressor =
+                brotli2::write::BrotliEncoder::new(buf, BROTLI_INDEX_COMPRESSION_LEVEL);
             writers.push(csv::Writer::from_writer(compressor));
         }
         writers
     };
     let mut dates_to_ids_reader = csv::Reader::from_path(DATES_TO_IDS_INTERMEDIARY_CSV).unwrap();
-    dates_to_ids_reader
-        .deserialize()
-        .for_each(
-            |res| {
-                let record: DateEntry = res.unwrap();
-                let has_remainder = record.revision_id % approx_bucket_size != 0;
-                let bucket = {
-                    if has_remainder {
-                        let bucket = record.revision_id / approx_bucket_size;
-                        if bucket > N_REVISION_FILES {
-                            bucket - 1 // handle last remainders
-                        } else {
-                            bucket
-                        }
-                    } else {
-                        (record.revision_id / approx_bucket_size) + 1
-                    }
-                };
-                little_date_file_writers[bucket as usize]
-                    .serialize(record)
-                    .unwrap()
+    dates_to_ids_reader.deserialize().for_each(|res| {
+        let record: DateEntry = res.unwrap();
+        let has_remainder = record.revision_id % approx_bucket_size != 0;
+        let bucket = {
+            if has_remainder {
+                let bucket = record.revision_id / approx_bucket_size;
+                if bucket > N_REVISION_FILES {
+                    bucket - 1 // handle last remainders
+                } else {
+                    bucket
+                }
+            } else {
+                (record.revision_id / approx_bucket_size) + 1
             }
-        );
+        };
+        little_date_file_writers[bucket as usize]
+            .serialize(record)
+            .unwrap()
+    });
     little_date_file_writers
         .drain(..)
         .for_each(|mut writer| writer.flush().unwrap());
@@ -638,16 +636,13 @@ fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Resul
         It: Iterator<Item=T1>,
         T1: Serialize + Deserialize<'a>,
 {
-    let byte_result_iter = it.map(
-        |obj|
-            match serde_json::to_string(&obj) {
-                Err(e) => Err(e),
-                Ok(mut s) => {
-                    s.push('\n');
-                    Ok(Bytes::from(s.into_bytes()))
-                }
-            }
-    );
+    let byte_result_iter = it.map(|obj| match serde_json::to_string(&obj) {
+        Err(e) => Err(e),
+        Ok(mut s) => {
+            s.push('\n');
+            Ok(Bytes::from(s.into_bytes()))
+        }
+    });
     stream::iter(byte_result_iter)
 }
 
@@ -660,7 +655,9 @@ async fn get_diffs_for_period(info: web::Path<(UnixTimeStamp, UnixTimeStamp)>) -
 }
 
 #[get("/{start}/{end}/revisions")]
-async fn get_revisions_for_period(info: web::Path<(UnixTimeStamp, UnixTimeStamp)>) -> impl Responder {
+async fn get_revisions_for_period(
+    info: web::Path<(UnixTimeStamp, UnixTimeStamp)>,
+) -> impl Responder {
     let start = FixedOffset::east(0).timestamp(info.0, 0); // arbitrary offset
     let end = FixedOffset::east(0).timestamp(info.1, 0);
     let stream = iter_to_byte_stream(STATE.revisions_from_period(start, end));
@@ -781,55 +778,53 @@ mod tests {
             .await
             .unwrap();
         let response_str = std::str::from_utf8(&bytes).unwrap();
-        let revisions: Vec<Revision> =
-            response_str
-                .lines()
-                .map(
-                    |line| serde_json::from_str(line).unwrap()
-                )
-                .collect();
-        let first_revision = Revision {
-            id: 1,
-            parent_id: None,
-            page_title: "nice".to_string(),
-            contributor_id: None,
-            contributor_name: None,
-            contributor_ip: Some("192.168.0.1".to_string()),
-            timestamp: "2017-03-19T04:23:23Z".to_string(),
-            text: Some("hi".to_string()),
-            comment: None,
-            page_id: 1,
-            page_ns: 1,
-        };
-        let middle_revision = Revision {
-            id: 2,
-            parent_id: Some(1),
-            page_title: "nice".to_string(),
-            contributor_id: Some(1),
-            contributor_name: Some("person".to_string()),
-            contributor_ip: None,
-            timestamp: "2017-03-19T04:24:23Z".to_string(),
-            text: Some("hi\nhi".to_string()),
-            comment: None,
-            page_id: 1,
-            page_ns: 1,
-        };
-        let final_revision = Revision {
-            id: 3,
-            parent_id: None,
-            page_title: "also nice".to_string(),
-            contributor_id: Some(2),
-            contributor_name: Some("another_person".to_string()),
-            contributor_ip: None,
-            timestamp: "2017-03-19T04:25:23Z".to_string(),
-            text: None,
-            comment: Some("sometimes there are comments".to_string()),
-            page_id: 2,
-            page_ns: 2,
-        };
+        let revisions: Vec<Revision> = response_str
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
         assert_eq!(
             revisions,
-            vec![first_revision, middle_revision, final_revision]
+            vec![
+                Revision {
+                    id: 1,
+                    parent_id: None,
+                    page_title: "nice".to_string(),
+                    contributor_id: None,
+                    contributor_name: None,
+                    contributor_ip: Some("192.168.0.1".to_string()),
+                    timestamp: "2017-03-19T04:23:23Z".to_string(),
+                    text: Some("hi".to_string()),
+                    comment: None,
+                    page_id: 1,
+                    page_ns: 1,
+                },
+                Revision {
+                    id: 2,
+                    parent_id: Some(1),
+                    page_title: "nice".to_string(),
+                    contributor_id: Some(1),
+                    contributor_name: Some("person".to_string()),
+                    contributor_ip: None,
+                    timestamp: "2017-03-19T04:24:23Z".to_string(),
+                    text: Some("hi\nhi".to_string()),
+                    comment: None,
+                    page_id: 1,
+                    page_ns: 1,
+                },
+                Revision {
+                    id: 3,
+                    parent_id: None,
+                    page_title: "also nice".to_string(),
+                    contributor_id: Some(2),
+                    contributor_name: Some("another_person".to_string()),
+                    contributor_ip: None,
+                    timestamp: "2017-03-19T04:25:23Z".to_string(),
+                    text: None,
+                    comment: Some("sometimes there are comments".to_string()),
+                    page_id: 2,
+                    page_ns: 2,
+                }
+            ]
         );
 
         // return some revisions
@@ -851,13 +846,24 @@ mod tests {
         let response_str = std::str::from_utf8(&bytes).unwrap();
         let revisions: Vec<Revision> = response_str
             .lines()
-            .map(
-                |line| serde_json::from_str(line).unwrap()
-            )
+            .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(
             revisions,
-            vec![middle_revision]
+            vec![
+                Revision {
+                    id: 2,
+                    parent_id: Some(1),
+                    page_title: "nice".to_string(),
+                    contributor_id: Some(1),
+                    contributor_name: Some("person".to_string()),
+                    contributor_ip: None,
+                    timestamp: "2017-03-19T04:24:23Z".to_string(),
+                    text: Some("hi\nhi".to_string()),
+                    comment: None,
+                    page_id: 1,
+                    page_ns: 1,
+                }]
         );
 
         // queries are left-inclusive to passed values, but not right-inclusive
@@ -879,13 +885,25 @@ mod tests {
         let response_str = std::str::from_utf8(&bytes).unwrap();
         let revisions: Vec<Revision> = response_str
             .lines()
-            .map(
-                |line| serde_json::from_str(line).unwrap()
-            )
+            .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert_eq!(
             revisions,
-            vec![middle_revision]
+            vec![
+                Revision {
+                    id: 2,
+                    parent_id: Some(1),
+                    page_title: "nice".to_string(),
+                    contributor_id: Some(1),
+                    contributor_name: Some("person".to_string()),
+                    contributor_ip: None,
+                    timestamp: "2017-03-19T04:24:23Z".to_string(),
+                    text: Some("hi\nhi".to_string()),
+                    comment: None,
+                    page_id: 1,
+                    page_ns: 1,
+                }
+            ]
         );
     }
 }
