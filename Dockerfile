@@ -1,7 +1,7 @@
 FROM pypy:3
 
 # install rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2020-09-28
 
 # install revisions downloader
 RUN pypy3 -m pip install git+https://github.com/DominicBurkart/wikipedia-revisions.git
@@ -22,8 +22,8 @@ ADD test_data/* test_data/
 # add code & compile
 ADD src/* src/
 RUN chmod +x /src/download
-RUN /root/.cargo/bin/cargo test
-RUN /root/.cargo/bin/cargo build --release
+RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo test
+RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo build +nightly --release
 RUN mv ./target/release/wikipedia-revisions-server ./wikipedia-revisions-server
 RUN rm -r ./target
 
