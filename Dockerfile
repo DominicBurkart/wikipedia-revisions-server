@@ -23,7 +23,7 @@ ADD test_data/* test_data/
 ADD src/* src/
 RUN chmod +x /src/download
 RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo test
-RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo build +nightly --release
+RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo build --release
 RUN mv ./target/release/wikipedia-revisions-server ./wikipedia-revisions-server
 RUN rm -r ./target
 
