@@ -283,7 +283,6 @@ fn position_map_file_from_id(id: RevisionID) -> String {
     format!("{}/{}_maps.csv", FAST_DIR, id % N_REVISION_FILES)
 }
 
-#[on(K8S)]
 fn compress_revision(revision: &Revision) -> CompressedRevision {
     let revision_string = serde_json::to_string(revision).unwrap();
 
@@ -297,13 +296,13 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
 
 /// calls compressor function. If compressor fails, retries with
 /// exponential backoff with a max backoff wait of
-async fn compress_loop(revision: &Revision) -> CompressedRevision {
+async fn compress_loop(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
     const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
     const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
     const WAIT_CEILING: u64 = 120_000;
     let mut n_tries: u32 = 1;
     loop {
-        let mut compression_result = compress_revision(revision).await;
+        let mut compression_result = compress_revisions(revisions).await;
         match compression_result {
             Ok(compressed_revision) => return compressed_revision,
             Err(error) => {
@@ -324,8 +323,12 @@ async fn compress_loop(revision: &Revision) -> CompressedRevision {
     }
 }
 
-async fn compress_revisions(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
-    join_all(revisions.iter().map(|revision| compress_loop(revision))).await
+#[on(K8S)]
+fn compress_revisions(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
+    revisions
+        .iter()
+        .map(|revision| compress_revision(revision))
+        .collect()
 }
 
 fn write_compressed_revision(
@@ -359,7 +362,7 @@ fn revisions_csv_to_files(
             .into_iter()
             .map(|chunk| {
                 let uncompressed_revisions: Vec<Revision> = chunk.collect();
-                let compressed_revisions = rt.block_on(compress_revisions(&uncompressed_revisions));
+                let compressed_revisions = rt.block_on(compress_loop(&uncompressed_revisions));
                 uncompressed_revisions.into_iter().zip(compressed_revisions)
             })
             .flatten()
