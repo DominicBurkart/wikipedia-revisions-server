@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::default::Default;
 use std::error::Error;
-use std::fs::{read_dir, remove_file, File};
+use std::fs::{File, read_dir, remove_file};
+use std::future::Future;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::iter::Iterator;
 use std::ops::Bound::{Included, Unbounded};
@@ -16,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use actix_web::{get, middleware, web, App as ActixApp, HttpResponse, HttpServer, Responder};
+use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use clap::{App, Arg};
@@ -24,14 +25,13 @@ use colored::*;
 use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
 use futures::future::join_all;
 use futures::stream::{self, Stream};
+use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 use tracing;
 use turbolift::kubernetes::K8s;
 use turbolift::on;
-use itertools::Itertools;
-use std::future::Future;
 
 const BUF_SIZE: usize = 512 * 1024;
 const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
@@ -42,7 +42,7 @@ const PIPE_DIR: &str = "/pipes";
 const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
 const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
-                                   // ^ must be less than max usize.
+// ^ must be less than max usize.
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -127,7 +127,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Vec<RevisionID>> + '_ {
+    ) -> impl Iterator<Item=Vec<RevisionID>> + '_ {
         // the prior start and trailing end are the
         // edges of the window of the trees that
         // contain the revisions from from start to end.
@@ -171,7 +171,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Revision> + '_ {
+    ) -> impl Iterator<Item=Revision> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_revision(id))
@@ -181,7 +181,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item = Vec<NewRevisionFragment>> + '_ {
+    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -325,11 +325,7 @@ async fn compress_loop(revision: &Revision) -> CompressedRevision {
 }
 
 async fn compress_revisions(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
-    join_all(
-        revisions
-            .iter()
-            .map(|revision| compress_loop(revision))
-    ).await
+    join_all(revisions.iter().map(|revision| compress_loop(revision))).await
 }
 
 fn write_compressed_revision(
@@ -357,45 +353,45 @@ fn revisions_csv_to_files(
         let mut rt = tokio::runtime::Runtime::new().unwrap();
 
         reader
-        .into_deserialize::<Revision>()
-        .map(|record| record.expect("fatal deserialization error while reading CSV."))
-        .chunks(COMPRESSION_CHUNKS)
-        .into_iter()
-        .map(|chunk| {
-            let uncompressed_revisions: Vec<Revision> = chunk.collect();
-            let compressed_revisions = rt.block_on(compress_revisions(&uncompressed_revisions));
-            uncompressed_revisions.into_iter().zip(compressed_revisions)
-        })
-        .flatten()
-        .map(|(record, compressed_bytes)| {
-            // row content:
-            //                        [
-            //                            "id",
-            //                            "parent_id",
-            //                            "page_title",
-            //                            "contributor_id",
-            //                            "contributor_name",
-            //                            "contributor_ip",
-            //                            "timestamp",
-            //                            "text",
-            //                            "comment",
-            //                            "page_id",
-            //                            "page_ns",
-            //                        ]
+            .into_deserialize::<Revision>()
+            .map(|record| record.expect("fatal deserialization error while reading CSV."))
+            .chunks(COMPRESSION_CHUNKS)
+            .into_iter()
+            .map(|chunk| {
+                let uncompressed_revisions: Vec<Revision> = chunk.collect();
+                let compressed_revisions = rt.block_on(compress_revisions(&uncompressed_revisions));
+                uncompressed_revisions.into_iter().zip(compressed_revisions)
+            })
+            .flatten()
+            .map(|(record, compressed_bytes)| {
+                // row content:
+                //                        [
+                //                            "id",
+                //                            "parent_id",
+                //                            "page_title",
+                //                            "contributor_id",
+                //                            "contributor_name",
+                //                            "contributor_ip",
+                //                            "timestamp",
+                //                            "text",
+                //                            "comment",
+                //                            "page_id",
+                //                            "page_ns",
+                //                        ]
 
-            // write record to file
-            let (record_start, record_length) = {
-                let lock_index = (record.id % N_REVISION_FILES) as usize;
-                let writer_lock = writer_locks.get(lock_index).unwrap();
-                let write_guard = writer_lock.lock().unwrap();
-                write_compressed_revision(compressed_bytes, write_guard)
-            };
+                // write record to file
+                let (record_start, record_length) = {
+                    let lock_index = (record.id % N_REVISION_FILES) as usize;
+                    let writer_lock = writer_locks.get(lock_index).unwrap();
+                    let write_guard = writer_lock.lock().unwrap();
+                    write_compressed_revision(compressed_bytes, write_guard)
+                };
 
-            // send summary info for constructing date & id mappings.
-            let date = DateTime::parse_from_rfc3339(&record.timestamp).unwrap();
-            (date, record.id, record_start, record_length)
-        })
-        .collect()
+                // send summary info for constructing date & id mappings.
+                let date = DateTime::parse_from_rfc3339(&record.timestamp).unwrap();
+                (date, record.id, record_start, record_length)
+            })
+            .collect()
     };
 
     log(&format!(
@@ -430,11 +426,11 @@ fn revisions_csv_to_files(
     log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
 
-fn all_revisions_files() -> impl Iterator<Item = String> {
+fn all_revisions_files() -> impl Iterator<Item=String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}", BIG_DIR, i))
 }
 
-fn all_ids_to_positions_paths() -> impl Iterator<Item = String> {
+fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}_maps.csv", FAST_DIR, i))
 }
 
@@ -442,7 +438,7 @@ fn ith_temporary_little_date_path(i: u64) -> String {
     format!("{}/{}_temp_date_mapping.csv", FAST_DIR, i)
 }
 
-fn all_temporary_little_date_file_paths() -> impl Iterator<Item = String> {
+fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
     (1..(N_REVISION_FILES + 1)).map(ith_temporary_little_date_path)
 }
 
@@ -692,10 +688,10 @@ fn download_revisions(date: String) {
     process_input_pipes(downloader_receiver);
 }
 
-fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item = serde_json::Result<bytes::Bytes>>
-where
-    It: Iterator<Item = T1>,
-    T1: Serialize + Deserialize<'a>,
+fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Result<bytes::Bytes>>
+    where
+        It: Iterator<Item=T1>,
+        T1: Serialize + Deserialize<'a>,
 {
     let byte_result_iter = it.map(|obj| match serde_json::to_string(&obj) {
         Err(e) => Err(e),
@@ -733,10 +729,10 @@ async fn server(bind: String) -> std::io::Result<()> {
             .service(get_diffs_for_period)
             .service(get_revisions_for_period)
     })
-    .keep_alive(45)
-    .bind(&bind)?
-    .run()
-    .await
+        .keep_alive(45)
+        .bind(&bind)?
+        .run()
+        .await
 }
 
 fn log(s: &str) {
@@ -819,7 +815,7 @@ mod tests {
                     .service(get_diffs_for_period)
                     .service(get_revisions_for_period),
             )
-            .await
+                .await
         };
 
         // return all test revisions
