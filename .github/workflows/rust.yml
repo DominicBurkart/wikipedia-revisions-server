@@ -16,10 +16,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v2
+    - name: install rustup and rust nightly
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2020-09-28
     - name: Format
       run: cargo fmt
     - name: Clippy
-      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo clippy +nightly -- -D warnings
+      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo clippy -- -D warnings
     - name: Build
-      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo build +nightly --verbose
+      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo build --verbose
       
