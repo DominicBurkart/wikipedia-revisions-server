@@ -22,6 +22,7 @@ use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use clap::{App, Arg};
 use colored::*;
 use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
+use cute::c;
 use futures::stream::{self, Stream};
 use itertools::Itertools;
 use regex::Regex;
@@ -40,6 +41,7 @@ const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
 const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
                                    // ^ must be less than max usize.
+const MAX_REPLICAS: u32 = 32;
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -248,7 +250,8 @@ lazy_static! {
         let pattern = format!(r"{}/(\d+)_temp_date_mapping.csv", FAST_DIR);
         Regex::new(&pattern).unwrap()
     };
-    static ref K8S: TokioMutex<K8s> = TokioMutex::new(K8s::new(Box::new(load_container), 32));
+    static ref K8S: TokioMutex<K8s> =
+        TokioMutex::new(K8s::new(Box::new(load_container), MAX_REPLICAS));
 }
 
 fn load_container(_tag: String) -> anyhow::Result<String> {
@@ -293,13 +296,13 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
 
 /// calls compressor function. If compressor fails, retries with
 /// exponential backoff with a max backoff wait of
-async fn compress_loop(revisions: &[Revision]) -> Vec<CompressedRevision> {
+async fn compress_loop(revisions: Vec<&Revision>) -> Vec<CompressedRevision> {
     const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
     const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
     const WAIT_CEILING: u64 = 120_000;
     let mut n_tries: u32 = 1;
     loop {
-        let compression_result = compress_revisions(revisions).await;
+        let compression_result = compress_revisions(&revisions).await;
         match compression_result {
             Ok(compressed_revision) => return compressed_revision,
             Err(error) => {
@@ -321,7 +324,7 @@ async fn compress_loop(revisions: &[Revision]) -> Vec<CompressedRevision> {
 }
 
 #[on(K8S)]
-fn compress_revisions(revisions: &[Revision]) -> Vec<CompressedRevision> {
+fn compress_revisions(revisions: &[&Revision]) -> Vec<CompressedRevision> {
     revisions
         .iter()
         .map(|revision| compress_revision(revision))
@@ -347,7 +350,8 @@ fn revisions_csv_to_files(
     ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
     writer_locks: Arc<[Mutex<WriteCounter>]>,
 ) {
-    const COMPRESSION_CHUNKS: usize = 200;
+    const COMPRESSION_CHUNKS: usize = 64;
+    const MAX_OUTSTANDING_REQUESTS: usize = 32;
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -355,16 +359,30 @@ fn revisions_csv_to_files(
             .expect("could not build runtime");
 
         reader
+            // attempt to deserialize, error if fail
             .into_deserialize::<Revision>()
             .map(|record| record.expect("fatal deserialization error while reading CSV."))
-            .chunks(COMPRESSION_CHUNKS)
+            // It's time to compress each record! We group revisions for compression:
+            // each request processes multiple revisions, and we keep track of multiple
+            // concurrent requests.
+            .chunks(COMPRESSION_CHUNKS * MAX_OUTSTANDING_REQUESTS)
             .into_iter()
             .map(|chunk| {
-                let uncompressed_revisions: Vec<Revision> = chunk.collect();
-                let compressed_revisions = rt.block_on(compress_loop(&uncompressed_revisions));
-                uncompressed_revisions.into_iter().zip(compressed_revisions)
+                let uncompressed_chunks: Vec<Revision> = chunk.collect();
+                let compressed_chunks = rt
+                    .block_on(futures::future::join_all(c![compress_loop(subchunk),
+                        for subchunk in uncompressed_chunks
+                            .iter()
+                            .chunks(COMPRESSION_CHUNKS)
+                            .into_iter()
+                            .map(|chunk| chunk.collect::<Vec<_>>())
+                    ]))
+                    .into_iter()
+                    .flatten();
+                uncompressed_chunks.into_iter().zip(compressed_chunks)
             })
             .flatten()
+            // compression is done, write record
             .map(|(record, compressed_bytes)| {
                 // row content:
                 //                        [
