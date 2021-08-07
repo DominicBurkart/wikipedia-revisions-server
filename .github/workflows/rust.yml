@@ -19,7 +19,7 @@ jobs:
     - name: Format
       run: cargo fmt
     - name: Clippy
-      run: cargo clippy -- -D warnings
+      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo clippy +nightly -- -D warnings
     - name: Build
-      run: cargo build --verbose
+      run: RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' cargo build +nightly --verbose
       
