@@ -7,8 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::default::Default;
 use std::error::Error;
-use std::fs::{File, read_dir, remove_file};
-use std::future::Future;
+use std::fs::{read_dir, remove_file, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::iter::Iterator;
 use std::ops::Bound::{Included, Unbounded};
@@ -17,19 +16,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
+use actix_web::{get, middleware, web, App as ActixApp, HttpResponse, HttpServer, Responder};
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use clap::{App, Arg};
 use colored::*;
 use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
-use futures::future::join_all;
 use futures::stream::{self, Stream};
 use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
-use tracing;
 use turbolift::kubernetes::K8s;
 use turbolift::on;
 
@@ -42,7 +39,7 @@ const PIPE_DIR: &str = "/pipes";
 const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
 const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
-// ^ must be less than max usize.
+                                   // ^ must be less than max usize.
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -127,7 +124,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<RevisionID>> + '_ {
+    ) -> impl Iterator<Item = Vec<RevisionID>> + '_ {
         // the prior start and trailing end are the
         // edges of the window of the trees that
         // contain the revisions from from start to end.
@@ -171,7 +168,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Revision> + '_ {
+    ) -> impl Iterator<Item = Revision> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_revision(id))
@@ -181,7 +178,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + '_ {
+    ) -> impl Iterator<Item = Vec<NewRevisionFragment>> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -254,7 +251,7 @@ lazy_static! {
     static ref K8S: TokioMutex<K8s> = TokioMutex::new(K8s::new(Box::new(load_container), 32));
 }
 
-fn load_container(tag: String) -> anyhow::Result<String> {
+fn load_container(_tag: String) -> anyhow::Result<String> {
     unimplemented!();
 }
 
@@ -296,13 +293,13 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
 
 /// calls compressor function. If compressor fails, retries with
 /// exponential backoff with a max backoff wait of
-async fn compress_loop(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
+async fn compress_loop(revisions: &[Revision]) -> Vec<CompressedRevision> {
     const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
     const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
     const WAIT_CEILING: u64 = 120_000;
     let mut n_tries: u32 = 1;
     loop {
-        let mut compression_result = compress_revisions(revisions).await;
+        let compression_result = compress_revisions(revisions).await;
         match compression_result {
             Ok(compressed_revision) => return compressed_revision,
             Err(error) => {
@@ -314,7 +311,7 @@ async fn compress_loop(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
                     WAIT_INTERCEPT + WAIT_EXPONENTIATION_BASE.pow(n_tries),
                     WAIT_CEILING,
                 );
-                tokio::time::sleep(tokio::time::Duration::from_millis(wait.into())).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(wait)).await;
                 if n_tries < 17 {
                     n_tries += 1;
                 }
@@ -324,7 +321,7 @@ async fn compress_loop(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
 }
 
 #[on(K8S)]
-fn compress_revisions(revisions: &Vec<Revision>) -> Vec<CompressedRevision> {
+fn compress_revisions(revisions: &[Revision]) -> Vec<CompressedRevision> {
     revisions
         .iter()
         .map(|revision| compress_revision(revision))
@@ -353,7 +350,7 @@ fn revisions_csv_to_files(
     const COMPRESSION_CHUNKS: usize = 200;
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
-        let mut rt = tokio::runtime::Builder::new_current_thread()
+        let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("could not build runtime");
 
@@ -431,11 +428,11 @@ fn revisions_csv_to_files(
     log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
 
-fn all_revisions_files() -> impl Iterator<Item=String> {
+fn all_revisions_files() -> impl Iterator<Item = String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}", BIG_DIR, i))
 }
 
-fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
+fn all_ids_to_positions_paths() -> impl Iterator<Item = String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}_maps.csv", FAST_DIR, i))
 }
 
@@ -443,7 +440,7 @@ fn ith_temporary_little_date_path(i: u64) -> String {
     format!("{}/{}_temp_date_mapping.csv", FAST_DIR, i)
 }
 
-fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
+fn all_temporary_little_date_file_paths() -> impl Iterator<Item = String> {
     (1..(N_REVISION_FILES + 1)).map(ith_temporary_little_date_path)
 }
 
@@ -693,10 +690,10 @@ fn download_revisions(date: String) {
     process_input_pipes(downloader_receiver);
 }
 
-fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Result<bytes::Bytes>>
-    where
-        It: Iterator<Item=T1>,
-        T1: Serialize + Deserialize<'a>,
+fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item = serde_json::Result<bytes::Bytes>>
+where
+    It: Iterator<Item = T1>,
+    T1: Serialize + Deserialize<'a>,
 {
     let byte_result_iter = it.map(|obj| match serde_json::to_string(&obj) {
         Err(e) => Err(e),
@@ -734,10 +731,10 @@ async fn server(bind: String) -> std::io::Result<()> {
             .service(get_diffs_for_period)
             .service(get_revisions_for_period)
     })
-        .keep_alive(45)
-        .bind(&bind)?
-        .run()
-        .await
+    .keep_alive(45)
+    .bind(&bind)?
+    .run()
+    .await
 }
 
 fn log(s: &str) {
@@ -820,7 +817,7 @@ mod tests {
                     .service(get_diffs_for_period)
                     .service(get_revisions_for_period),
             )
-                .await
+            .await
         };
 
         // return all test revisions
