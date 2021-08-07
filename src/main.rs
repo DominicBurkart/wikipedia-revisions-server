@@ -353,7 +353,9 @@ fn revisions_csv_to_files(
     const COMPRESSION_CHUNKS: usize = 200;
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
-        let mut rt = tokio::runtime::Runtime::new().unwrap();
+        let mut rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("could not build runtime");
 
         reader
             .into_deserialize::<Revision>()
