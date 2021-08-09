@@ -42,7 +42,6 @@ const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
                                    // ^ must be less than max usize.
 const MAX_REPLICAS: u32 = 32;
-const DOCKER_USERNAME: &str = "dominicburkart";
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -253,10 +252,16 @@ lazy_static! {
     };
     static ref K8S: TokioMutex<K8s> =
         TokioMutex::new(K8s::new(Box::new(load_container), MAX_REPLICAS));
+    static ref DOCKER_USERNAME: Arc<Mutex<String>> =
+        Arc::new(Mutex::new("<your username here>".to_string()));
 }
 
 fn load_container(tag: String) -> anyhow::Result<String> {
-    let new_name = format!("{}/{}", DOCKER_USERNAME, tag);
+    // get username
+    let username = DOCKER_USERNAME
+        .lock()
+        .expect("could not get docker username from mutex");
+    let new_name = format!("{}/{}", username, tag);
 
     // rename local image
     let renamed = Command::new("docker")
@@ -278,7 +283,7 @@ fn load_container(tag: String) -> anyhow::Result<String> {
         .args(format!("push {new_name}", new_name = new_name).split(' '))
         .status()?;
     if !pushed.success() {
-        return Err(anyhow::anyhow!("could not push image. Was repository initialized? See https://docs.docker.com/docker-hub/#step-2-create-your-first-repository"));
+        return Err(anyhow::anyhow!("Could not push image. Have you logged in to the docker CLI and initialized the repo? See https://docs.docker.com/docker-hub/#step-2-create-your-first-repository"));
     }
 
     Ok(new_name)
@@ -810,11 +815,21 @@ fn main() {
             .value_name("BIND")
             .help("address and port to bind the server to. Example: 127.0.0.1:8088")
             .takes_value(true))
+        .arg(Arg::with_name("docker_username")
+            .short("u")
+            .long("docker_username")
+            .value_name("DOCKER_USERNAME")
+            .help("Docker username to push images to. Only used if K8s feature is activated.")
+            .takes_value(true))
         .get_matches();
 
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
         download_revisions(date.to_string());
+    }
+
+    if let Some(username) = matches.value_of("docker_username") {
+        *DOCKER_USERNAME.lock().unwrap() = username.to_string();
     }
 
     // start server
