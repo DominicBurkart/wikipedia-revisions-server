@@ -42,6 +42,7 @@ const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
                                    // ^ must be less than max usize.
 const MAX_REPLICAS: u32 = 32;
+const DOCKER_USERNAME: &str = "dominicburkart";
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -254,8 +255,33 @@ lazy_static! {
         TokioMutex::new(K8s::new(Box::new(load_container), MAX_REPLICAS));
 }
 
-fn load_container(_tag: String) -> anyhow::Result<String> {
-    unimplemented!();
+fn load_container(tag: String) -> anyhow::Result<String> {
+    let new_name = format!("{}/{}", DOCKER_USERNAME, tag);
+
+    // rename local image
+    let renamed = Command::new("docker")
+        .args(
+            format!(
+                "container rename {tag} {new_name}",
+                tag = tag,
+                new_name = new_name
+            )
+            .split(' '),
+        )
+        .status()?;
+    if !renamed.success() {
+        return Err(anyhow::anyhow!("could not rename image"));
+    }
+
+    // push image to hub
+    let pushed = Command::new("docker")
+        .args(format!("push {new_name}", new_name = new_name).split(' '))
+        .status()?;
+    if !pushed.success() {
+        return Err(anyhow::anyhow!("could not push image. Was repository initialized? See https://docs.docker.com/docker-hub/#step-2-create-your-first-repository"));
+    }
+
+    Ok(new_name)
 }
 
 struct WriteCounter {
