@@ -46,6 +46,8 @@ the compressed revisions and their indices to the relevant files.
 Additional requirements for distribution:
 
 - All [Turbolift requirements](https://dominic.computer/turbolift#kubernetes-requirements)
+  - to access docker inside a docker container, we expose the docker socket as a volume (`-v /var/run/docker.sock:/var/run/docker.sock`).
+  Example: `docker run -it -v /var/run/docker.sock:/var/run/docker.sock -v /local/path:/fast_dir -v /other/local/path:/big_dir wikipedia-revisions-server`
 - The compression image is published to the user's public Docker hub as a public image. The user
 must initialize the docker hub repository manually and log into the docker CLI as described
 in the [docker docs](https://docs.docker.com/docker-hub), so that the program may push the image.
