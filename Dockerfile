@@ -44,13 +44,15 @@ RUN chmod +x /src/download
 RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo test
 RUN RUSTFLAGS='--cfg procmacro2_semver_exempt -Z macro-backtrace' /root/.cargo/bin/cargo build --release
 RUN mv ./target/release/wikipedia-revisions-server ./wikipedia-revisions-server
-RUN rm -r ./target
 
 # set env variables
 ENV TERM xterm-256color
 ENV RUST_BACKTRACE=1
 
-ENTRYPOINT ["./wikipedia-revisions-server"]
+ENTRYPOINT ["./target/release/wikipedia-revisions-server"]
 
 # example use:
+# docker build -t wikipedia-revisions-server . && docker run -it -v /Volumes/doggo:/fast_dir -v /Volumes/burkart-6tb/wiki_revisions:/big_dir wikipedia-revisions-server -d 20200601
+
+# with distribution:
 # docker build -t wikipedia-revisions-server . && docker run -it -v /Volumes/doggo:/fast_dir -v /Volumes/burkart-6tb/wiki_revisions:/big_dir wikipedia-revisions-server -d 20200601

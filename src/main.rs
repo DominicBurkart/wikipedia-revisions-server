@@ -34,11 +34,13 @@ use turbolift::on;
 const BUF_SIZE: usize = 512 * 1024;
 const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
 const BROTLI_INDEX_COMPRESSION_LEVEL: u32 = 3;
-const FAST_DIR: &str = "/fast_dir";
-const BIG_DIR: &str = "/big_dir";
-const PIPE_DIR: &str = "/pipes";
-const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
-const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
+const FAST_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/fast_dir";
+const BIG_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/big_dir";
+const PIPE_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/pipes";
+const DATES_TO_IDS_INTERMEDIARY_CSV: &str =
+    "/home/ubuntu/wikipedia-revisions-server/fast_dir/dates_to_ids.csv";
+const SUPER_DATE_BTREE_FILE: &str =
+    "/home/ubuntu/wikipedia-revisions-server/fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
                                    // ^ must be less than max usize.
 const MAX_REPLICAS: u32 = 32;
@@ -522,7 +524,6 @@ fn get_largest_id() -> RevisionID {
 }
 
 fn process_input_pipes(downloader_receiver: Receiver<bool>) {
-    let pipe_dir = "/pipes";
     let mut pending_receivers = HashMap::new();
     pending_receivers.insert("_".to_string(), downloader_receiver);
     let re = Regex::new(r"revisions-\d+-\d+\.pipe").unwrap();
@@ -563,7 +564,7 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
     // thread devoted to reading its contents into the storage directory.
     while !complete {
-        for entry in read_dir(pipe_dir).unwrap() {
+        for entry in read_dir(PIPE_DIR).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().into_string().unwrap();
             if re.is_match(&name) && !pending_receivers.contains_key(&name) {
@@ -718,7 +719,7 @@ fn download_revisions(date: String) {
 
         thread::spawn(move || {
             log("starting downloader program...");
-            let status = Command::new("/src/download")
+            let status = Command::new("./src/download")
                 .arg(FAST_DIR)
                 .arg(&date)
                 .arg(&num_subprocesses)
