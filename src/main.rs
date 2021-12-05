@@ -262,14 +262,15 @@ fn load_container(tag: String) -> anyhow::Result<String> {
     let username = DOCKER_USERNAME
         .lock()
         .expect("could not get docker username from mutex");
-    let new_name = format!("{}/{}", username, tag);
+    let tag_without_release = tag.splitn(2, ':').next().unwrap();
+    let new_name = format!("{}/{}", username, tag_without_release);
 
     // rename local image
     let renamed = Command::new("docker")
         .args(
             format!(
-                "container rename {tag} {new_name}",
-                tag = tag,
+                "container rename {tag_without_release} {new_name}",
+                tag_without_release = tag_without_release,
                 new_name = new_name
             )
             .split(' '),
