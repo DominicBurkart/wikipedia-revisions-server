@@ -326,6 +326,14 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
     v
 }
 
+#[on(K8S)]
+fn compress_revisions(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
+    revisions
+        .iter()
+        .map(|revision| compress_revision(revision))
+        .collect()
+}
+
 /// calls compressor function. If compressor fails, retries with
 /// exponential backoff with a max backoff wait of 2 minutes.
 async fn compress_loop(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
@@ -353,14 +361,6 @@ async fn compress_loop(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
             }
         }
     }
-}
-
-#[on(K8S)]
-fn compress_revisions(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
-    revisions
-        .iter()
-        .map(|revision| compress_revision(revision))
-        .collect()
 }
 
 fn write_compressed_revision(
