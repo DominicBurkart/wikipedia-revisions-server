@@ -6,34 +6,43 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::default::Default;
 use std::error::Error;
-use std::fs::{File, read_dir, remove_file};
+use std::fs::{read_dir, remove_file, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::iter::Iterator;
 use std::ops::Bound::{Included, Unbounded};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use actix_web::{App as ActixApp, get, HttpResponse, HttpServer, middleware, Responder, web};
+use actix_web::{get, middleware, web, App as ActixApp, HttpResponse, HttpServer, Responder};
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use clap::{App, Arg};
 use colored::*;
 use crossbeam::crossbeam_channel::{bounded, Receiver, Select};
+use cute::c;
 use futures::stream::{self, Stream};
+use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as TokioMutex;
+use turbolift::kubernetes::K8s;
+use turbolift::on;
 
 const BUF_SIZE: usize = 512 * 1024;
-const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
+const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 11;
 const BROTLI_INDEX_COMPRESSION_LEVEL: u32 = 3;
-const FAST_DIR: &str = "/fast_dir";
-const BIG_DIR: &str = "/big_dir";
-const PIPE_DIR: &str = "/pipes";
-const DATES_TO_IDS_INTERMEDIARY_CSV: &str = "fast_dir/dates_to_ids.csv";
-const SUPER_DATE_BTREE_FILE: &str = "fast_dir/super_date_btree_file.json";
+const FAST_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/fast_dir";
+const BIG_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/big_dir";
+const PIPE_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/pipes";
+const DATES_TO_IDS_INTERMEDIARY_CSV: &str =
+    "/home/ubuntu/wikipedia-revisions-server/fast_dir/dates_to_ids.csv";
+const SUPER_DATE_BTREE_FILE: &str =
+    "/home/ubuntu/wikipedia-revisions-server/fast_dir/super_date_btree_file.json";
 const N_REVISION_FILES: u64 = 200; // note: changing this field requires rebuilding files
-// ^ must be less than max usize.
+                                   // ^ must be less than max usize.
+const MAX_REPLICAS: u32 = 32;
 
 type RevisionID = u64;
 type ContributorID = u64;
@@ -49,7 +58,7 @@ type UnixTimeStamp = i64;
 type PageNs = u32;
 // position of record in corresponding file
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 struct Revision {
     id: RevisionID,
     parent_id: Option<RevisionID>,
@@ -118,7 +127,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<RevisionID>> + '_ {
+    ) -> impl Iterator<Item = Vec<RevisionID>> + '_ {
         // the prior start and trailing end are the
         // edges of the window of the trees that
         // contain the revisions from from start to end.
@@ -162,7 +171,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Revision> + '_ {
+    ) -> impl Iterator<Item = Revision> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_revision(id))
@@ -172,7 +181,7 @@ impl State {
         &self,
         start: Instant,
         end: Instant,
-    ) -> impl Iterator<Item=Vec<NewRevisionFragment>> + '_ {
+    ) -> impl Iterator<Item = Vec<NewRevisionFragment>> + '_ {
         self.revision_ids_from_period(start, end)
             .flatten()
             .map(move |id| self.get_new_or_modified_fragments(id))
@@ -242,6 +251,44 @@ lazy_static! {
         let pattern = format!(r"{}/(\d+)_temp_date_mapping.csv", FAST_DIR);
         Regex::new(&pattern).unwrap()
     };
+    static ref K8S: TokioMutex<K8s> =
+        TokioMutex::new(K8s::new(Box::new(load_container), MAX_REPLICAS));
+    static ref DOCKER_USERNAME: Arc<Mutex<String>> =
+        Arc::new(Mutex::new("<your username here>".to_string()));
+}
+
+fn load_container(tag: String) -> anyhow::Result<String> {
+    // get username
+    let username = DOCKER_USERNAME
+        .lock()
+        .expect("could not get docker username from mutex");
+    let tag_without_release = tag.splitn(2, ':').next().unwrap();
+    let new_name = format!("{}/{}", username, tag_without_release);
+
+    // rename local image
+    let renamed = Command::new("docker")
+        .args(
+            format!(
+                "container rename {tag_without_release} {new_name}",
+                tag_without_release = tag_without_release,
+                new_name = new_name
+            )
+            .split(' '),
+        )
+        .status()?;
+    if !renamed.success() {
+        return Err(anyhow::anyhow!("could not rename image"));
+    }
+
+    // push image to hub
+    let pushed = Command::new("docker")
+        .args(format!("push {new_name}", new_name = new_name).split(' '))
+        .status()?;
+    if !pushed.success() {
+        return Err(anyhow::anyhow!("Could not push image. Have you logged in to the docker CLI and initialized the repo? See https://docs.docker.com/docker-hub/#step-2-create-your-first-repository"));
+    }
+
+    Ok(new_name)
 }
 
 struct WriteCounter {
@@ -280,6 +327,43 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
     v
 }
 
+#[on(K8S)]
+fn compress_revisions(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
+    revisions
+        .iter()
+        .map(|revision| compress_revision(revision))
+        .collect()
+}
+
+/// calls compressor function. If compressor fails, retries with
+/// exponential backoff with a max backoff wait of 2 minutes.
+async fn compress_loop(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
+    const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
+    const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
+    const WAIT_CEILING: u64 = 120_000;
+    let mut n_tries: u32 = 1;
+    loop {
+        let compression_result = compress_revisions(revisions.clone()).await;
+        match compression_result {
+            Ok(compressed_revision) => return compressed_revision,
+            Err(error) => {
+                warning(&format!(
+                    "Compression error: could not compress revision: {:?}",
+                    error
+                ));
+                let wait = std::cmp::min(
+                    WAIT_INTERCEPT + WAIT_EXPONENTIATION_BASE.pow(n_tries),
+                    WAIT_CEILING,
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(wait)).await;
+                if n_tries < 17 {
+                    n_tries += 1;
+                }
+            }
+        }
+    }
+}
+
 fn write_compressed_revision(
     compressed_bytes: CompressedRevision,
     mut write_guard: std::sync::MutexGuard<WriteCounter>,
@@ -299,13 +383,40 @@ fn revisions_csv_to_files(
     ids_to_positions: Arc<Mutex<Vec<csv::Writer<BufWriter<File>>>>>,
     writer_locks: Arc<[Mutex<WriteCounter>]>,
 ) {
+    const COMPRESSION_CHUNKS: usize = 64;
+    const MAX_OUTSTANDING_REQUESTS: usize = 32;
     let mut records_vec: Vec<(Instant, u64, Offset, RecordLength)> = {
         let reader = csv::Reader::from_path(&input_path).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("could not build runtime");
 
         reader
-            .into_deserialize()
-            .filter_map(Result::ok)
-            .map(|record: Revision| {
+            // attempt to deserialize, error if fail
+            .into_deserialize::<Revision>()
+            .map(|record| record.expect("fatal deserialization error while reading CSV."))
+            // It's time to compress each record! We group revisions for compression:
+            // each request processes multiple revisions, and we keep track of multiple
+            // concurrent requests.
+            .chunks(COMPRESSION_CHUNKS * MAX_OUTSTANDING_REQUESTS)
+            .into_iter()
+            .map(|chunk| {
+                let uncompressed_chunks: Vec<Revision> = chunk.collect();
+                let compressed_chunks = rt
+                    .block_on(futures::future::join_all(c![compress_loop(subchunk),
+                        for subchunk in uncompressed_chunks
+                            .iter()
+                            .chunks(COMPRESSION_CHUNKS)
+                            .into_iter()
+                            .map(|chunk| chunk.cloned().collect::<Vec<_>>())
+                    ]))
+                    .into_iter()
+                    .flatten();
+                uncompressed_chunks.into_iter().zip(compressed_chunks)
+            })
+            .flatten()
+            // compression is done, write record
+            .map(|(record, compressed_bytes)| {
                 // row content:
                 //                        [
                 //                            "id",
@@ -323,7 +434,6 @@ fn revisions_csv_to_files(
 
                 // write record to file
                 let (record_start, record_length) = {
-                    let compressed_bytes = compress_revision(&record);
                     let lock_index = (record.id % N_REVISION_FILES) as usize;
                     let writer_lock = writer_locks.get(lock_index).unwrap();
                     let write_guard = writer_lock.lock().unwrap();
@@ -369,11 +479,11 @@ fn revisions_csv_to_files(
     log(&format!("indices from pipe {} saved. 👩‍🎤", input_path));
 }
 
-fn all_revisions_files() -> impl Iterator<Item=String> {
+fn all_revisions_files() -> impl Iterator<Item = String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}", BIG_DIR, i))
 }
 
-fn all_ids_to_positions_paths() -> impl Iterator<Item=String> {
+fn all_ids_to_positions_paths() -> impl Iterator<Item = String> {
     (0..N_REVISION_FILES).map(|i| format!("{}/{}_maps.csv", FAST_DIR, i))
 }
 
@@ -381,7 +491,7 @@ fn ith_temporary_little_date_path(i: u64) -> String {
     format!("{}/{}_temp_date_mapping.csv", FAST_DIR, i)
 }
 
-fn all_temporary_little_date_file_paths() -> impl Iterator<Item=String> {
+fn all_temporary_little_date_file_paths() -> impl Iterator<Item = String> {
     (1..(N_REVISION_FILES + 1)).map(ith_temporary_little_date_path)
 }
 
@@ -414,7 +524,6 @@ fn get_largest_id() -> RevisionID {
 }
 
 fn process_input_pipes(downloader_receiver: Receiver<bool>) {
-    let pipe_dir = "/pipes";
     let mut pending_receivers = HashMap::new();
     pending_receivers.insert("_".to_string(), downloader_receiver);
     let re = Regex::new(r"revisions-\d+-\d+\.pipe").unwrap();
@@ -455,7 +564,7 @@ fn process_input_pipes(downloader_receiver: Receiver<bool>) {
     // until the downloader is complete, scan for open pipes. Each time one is opened, start a
     // thread devoted to reading its contents into the storage directory.
     while !complete {
-        for entry in read_dir(pipe_dir).unwrap() {
+        for entry in read_dir(PIPE_DIR).unwrap() {
             let entry = entry.unwrap();
             let name = entry.file_name().into_string().unwrap();
             if re.is_match(&name) && !pending_receivers.contains_key(&name) {
@@ -610,7 +719,7 @@ fn download_revisions(date: String) {
 
         thread::spawn(move || {
             log("starting downloader program...");
-            let status = Command::new("/src/download")
+            let status = Command::new("./src/download")
                 .arg(FAST_DIR)
                 .arg(&date)
                 .arg(&num_subprocesses)
@@ -631,10 +740,10 @@ fn download_revisions(date: String) {
     process_input_pipes(downloader_receiver);
 }
 
-fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item=serde_json::Result<bytes::Bytes>>
-    where
-        It: Iterator<Item=T1>,
-        T1: Serialize + Deserialize<'a>,
+fn iter_to_byte_stream<'a, It, T1>(it: It) -> impl Stream<Item = serde_json::Result<bytes::Bytes>>
+where
+    It: Iterator<Item = T1>,
+    T1: Serialize + Deserialize<'a>,
 {
     let byte_result_iter = it.map(|obj| match serde_json::to_string(&obj) {
         Err(e) => Err(e),
@@ -672,10 +781,10 @@ async fn server(bind: String) -> std::io::Result<()> {
             .service(get_diffs_for_period)
             .service(get_revisions_for_period)
     })
-        .keep_alive(45)
-        .bind(&bind)?
-        .run()
-        .await
+    .keep_alive(45)
+    .bind(&bind)?
+    .run()
+    .await
 }
 
 fn log(s: &str) {
@@ -707,11 +816,21 @@ fn main() {
             .value_name("BIND")
             .help("address and port to bind the server to. Example: 127.0.0.1:8088")
             .takes_value(true))
+        .arg(Arg::with_name("docker_username")
+            .short("u")
+            .long("docker_username")
+            .value_name("DOCKER_USERNAME")
+            .help("Docker username to push images to. Only used if K8s feature is activated.")
+            .takes_value(true))
         .get_matches();
 
     // if we have a passed date, download the revisions
     if let Some(date) = matches.value_of("date") {
         download_revisions(date.to_string());
+    }
+
+    if let Some(username) = matches.value_of("docker_username") {
+        *DOCKER_USERNAME.lock().unwrap() = username.to_string();
     }
 
     // start server
@@ -758,7 +877,7 @@ mod tests {
                     .service(get_diffs_for_period)
                     .service(get_revisions_for_period),
             )
-                .await
+            .await
         };
 
         // return all test revisions
@@ -850,20 +969,19 @@ mod tests {
             .collect();
         assert_eq!(
             revisions,
-            vec![
-                Revision {
-                    id: 2,
-                    parent_id: Some(1),
-                    page_title: "nice".to_string(),
-                    contributor_id: Some(1),
-                    contributor_name: Some("person".to_string()),
-                    contributor_ip: None,
-                    timestamp: "2017-03-19T04:24:23Z".to_string(),
-                    text: Some("hi\nhi".to_string()),
-                    comment: None,
-                    page_id: 1,
-                    page_ns: 1,
-                }]
+            vec![Revision {
+                id: 2,
+                parent_id: Some(1),
+                page_title: "nice".to_string(),
+                contributor_id: Some(1),
+                contributor_name: Some("person".to_string()),
+                contributor_ip: None,
+                timestamp: "2017-03-19T04:24:23Z".to_string(),
+                text: Some("hi\nhi".to_string()),
+                comment: None,
+                page_id: 1,
+                page_ns: 1,
+            }]
         );
 
         // queries are left-inclusive to passed values, but not right-inclusive
@@ -889,21 +1007,19 @@ mod tests {
             .collect();
         assert_eq!(
             revisions,
-            vec![
-                Revision {
-                    id: 2,
-                    parent_id: Some(1),
-                    page_title: "nice".to_string(),
-                    contributor_id: Some(1),
-                    contributor_name: Some("person".to_string()),
-                    contributor_ip: None,
-                    timestamp: "2017-03-19T04:24:23Z".to_string(),
-                    text: Some("hi\nhi".to_string()),
-                    comment: None,
-                    page_id: 1,
-                    page_ns: 1,
-                }
-            ]
+            vec![Revision {
+                id: 2,
+                parent_id: Some(1),
+                page_title: "nice".to_string(),
+                contributor_id: Some(1),
+                contributor_name: Some("person".to_string()),
+                contributor_ip: None,
+                timestamp: "2017-03-19T04:24:23Z".to_string(),
+                text: Some("hi\nhi".to_string()),
+                comment: None,
+                page_id: 1,
+                page_ns: 1,
+            }]
         );
     }
 }
