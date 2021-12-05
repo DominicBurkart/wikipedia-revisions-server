@@ -58,7 +58,7 @@ type UnixTimeStamp = i64;
 type PageNs = u32;
 // position of record in corresponding file
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Clone)]
 struct Revision {
     id: RevisionID,
     parent_id: Option<RevisionID>,
@@ -328,13 +328,13 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
 
 /// calls compressor function. If compressor fails, retries with
 /// exponential backoff with a max backoff wait of 2 minutes.
-async fn compress_loop(revisions: Vec<&Revision>) -> Vec<CompressedRevision> {
+async fn compress_loop(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
     const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
     const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
     const WAIT_CEILING: u64 = 120_000;
     let mut n_tries: u32 = 1;
     loop {
-        let compression_result = compress_revisions(&revisions).await;
+        let compression_result = compress_revisions(revisions.clone()).await;
         match compression_result {
             Ok(compressed_revision) => return compressed_revision,
             Err(error) => {
@@ -356,7 +356,7 @@ async fn compress_loop(revisions: Vec<&Revision>) -> Vec<CompressedRevision> {
 }
 
 #[on(K8S)]
-fn compress_revisions(revisions: &[&Revision]) -> Vec<CompressedRevision> {
+fn compress_revisions(revisions: Vec<Revision>) -> Vec<CompressedRevision> {
     revisions
         .iter()
         .map(|revision| compress_revision(revision))
@@ -407,7 +407,7 @@ fn revisions_csv_to_files(
                             .iter()
                             .chunks(COMPRESSION_CHUNKS)
                             .into_iter()
-                            .map(|chunk| chunk.collect::<Vec<_>>())
+                            .map(|chunk| chunk.cloned().collect::<Vec<_>>())
                     ]))
                     .into_iter()
                     .flatten();
