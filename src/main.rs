@@ -327,7 +327,7 @@ fn compress_revision(revision: &Revision) -> CompressedRevision {
 }
 
 /// calls compressor function. If compressor fails, retries with
-/// exponential backoff with a max backoff wait of
+/// exponential backoff with a max backoff wait of 2 minutes.
 async fn compress_loop(revisions: Vec<&Revision>) -> Vec<CompressedRevision> {
     const WAIT_INTERCEPT: u64 = 200; // min time to wait after failed request
     const WAIT_EXPONENTIATION_BASE: u64 = 2; // base for exponential backoff
