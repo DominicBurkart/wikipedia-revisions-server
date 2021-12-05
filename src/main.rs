@@ -31,7 +31,7 @@ use turbolift::kubernetes::K8s;
 use turbolift::on;
 
 const BUF_SIZE: usize = 512 * 1024;
-const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 8;
+const BROTLI_DATA_COMPRESSION_LEVEL: u32 = 11;
 const BROTLI_INDEX_COMPRESSION_LEVEL: u32 = 3;
 const FAST_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/fast_dir";
 const BIG_DIR: &str = "/home/ubuntu/wikipedia-revisions-server/big_dir";
